@@ -33,6 +33,7 @@ target_sources(
   # Autolinking Setup
   ../nitrogen/generated/android/NitroFlipperOnLoad.cpp
   # Shared Nitrogen C++ sources
+  ../nitrogen/generated/shared/c++/HybridComicArchiveSourceSpec.cpp
   ../nitrogen/generated/shared/c++/HybridPageCurlSolverSpec.cpp
   # Android-specific Nitrogen C++ sources
   

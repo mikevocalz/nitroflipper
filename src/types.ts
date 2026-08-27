@@ -44,4 +44,5 @@ export interface PageSource {
   getPageBox(index: number): PageBox;
   locatorForPage(index: number): Locator;
   pageForLocator(loc: Locator): number;
+  readEntryBytes(index: number): Promise<ArrayBuffer>;
 }
