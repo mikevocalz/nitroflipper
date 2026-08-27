@@ -1,0 +1,19 @@
+{
+  "$schema": "https://nitro.margelo.com/nitro.schema.json",
+  "cxxNamespace": ["nitroflipper"],
+  "ios": {
+    "iosModuleName": "NitroFlipper"
+  },
+  "android": {
+    "androidNamespace": ["nitroflipper"],
+    "androidCxxLibName": "NitroFlipper"
+  },
+  "autolinking": {
+    "PageCurlSolver": {
+      "all": {
+        "language": "c++",
+        "implementationClassName": "HybridPageCurlSolver"
+      }
+    }
+  }
+}
