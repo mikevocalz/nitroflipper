@@ -1,0 +1,9 @@
+node_modules
+build
+lib
+ios/build
+android/build
+*.log
+.DS_Store
+.vscode
+.idea
