@@ -16,6 +16,7 @@
 #include <NitroModules/HybridObjectRegistry.hpp>
 
 #include "HybridPageCurlSolver.hpp"
+#include "HybridComicArchiveSource.hpp"
 
 namespace margelo::nitro::nitroflipper {
 
@@ -42,6 +43,15 @@ void registerAllNatives() {
                     "The HybridObject \"HybridPageCurlSolver\" is not default-constructible! "
                     "Create a public constructor that takes zero arguments to be able to autolink this HybridObject.");
       return std::make_shared<HybridPageCurlSolver>();
+    }
+  );
+  HybridObjectRegistry::registerHybridObjectConstructor(
+    "ComicArchiveSource",
+    []() -> std::shared_ptr<HybridObject> {
+      static_assert(std::is_default_constructible_v<HybridComicArchiveSource>,
+                    "The HybridObject \"HybridComicArchiveSource\" is not default-constructible! "
+                    "Create a public constructor that takes zero arguments to be able to autolink this HybridObject.");
+      return std::make_shared<HybridComicArchiveSource>();
     }
   );
 }

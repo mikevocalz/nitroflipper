@@ -9,15 +9,18 @@ export * from './pagination/PositionResolver';
 export * from './pagination/SpreadPolicy';
 
 export * from './sources/ComicArchiveSource';
+export * from './renderer';
 
 export type { PageCurlSolver } from '../nitro/PageCurlSolver.nitro';
 export type { ComicArchiveSource } from '../nitro/ComicArchiveSource.nitro';
 export * from '../nitro/FlipperTypes';
 
-export const pageCurlSolver = NitroModules.createHybridObject<import('../nitro/PageCurlSolver.nitro').PageCurlSolver>(
-  'PageCurlSolver',
-);
+export function createPageCurlSolver(): import('../nitro/PageCurlSolver.nitro').PageCurlSolver {
+  return NitroModules.createHybridObject<import('../nitro/PageCurlSolver.nitro').PageCurlSolver>(
+    'PageCurlSolver',
+  );
+}
 
-export const createComicArchiveSource = (): import('./sources/ComicArchiveSource').ComicArchiveSource => {
+export function createComicArchiveSource(): import('./sources/ComicArchiveSource').ComicArchiveSource {
   return new (require('./sources/ComicArchiveSource').ComicArchiveSource)();
-};
+}

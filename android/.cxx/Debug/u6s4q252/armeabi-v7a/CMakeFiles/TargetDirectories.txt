@@ -1,0 +1,3 @@
+/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/android/.cxx/Debug/u6s4q252/armeabi-v7a/CMakeFiles/NitroFlipper.dir
+/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/android/.cxx/Debug/u6s4q252/armeabi-v7a/CMakeFiles/edit_cache.dir
+/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/android/.cxx/Debug/u6s4q252/armeabi-v7a/CMakeFiles/rebuild_cache.dir

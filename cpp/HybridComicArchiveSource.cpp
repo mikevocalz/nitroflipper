@@ -47,7 +47,7 @@ static SpreadSlot toNitro(native::SpreadSlot slot) {
 }
 
 HybridComicArchiveSource::HybridComicArchiveSource()
-    : HybridComicArchiveSourceSpec() {}
+    : HybridObject(TAG), HybridComicArchiveSourceSpec() {}
 
 std::shared_ptr<Promise<void>> HybridComicArchiveSource::open(
     const std::string& path) {

@@ -1,0 +1,1 @@
+/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/android/build/intermediates/cxx/Debug/u6s4q252/obj/x86_64

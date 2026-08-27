@@ -6,7 +6,8 @@ namespace margelo::nitro::nitroflipper {
 
 using namespace margelo::nitro;
 
-HybridPageCurlSolver::HybridPageCurlSolver() : HybridPageCurlSolverSpec() {}
+HybridPageCurlSolver::HybridPageCurlSolver()
+    : HybridObject(TAG), HybridPageCurlSolverSpec() {}
 
 ::nitroflipper::Config HybridPageCurlSolver::toNativeConfig(
     const Config& config) {

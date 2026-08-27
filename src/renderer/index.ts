@@ -1,0 +1,1 @@
+export { PageCurlView } from './PageCurlView';
