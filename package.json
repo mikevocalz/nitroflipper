@@ -19,8 +19,9 @@
   "scripts": {
     "build": "tsc --noEmit false --declaration true --outDir lib",
     "typecheck": "tsc --noEmit",
-    "test": "npm run typecheck && npm run test:cpp",
-    "test:cpp": "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target pagecurlsolver_test && ./build/tests/pagecurlsolver_test",
+    "test": "npm run typecheck && npm run test:cpp && npm run test:ts",
+    "test:cpp": "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target pagecurlsolver_test && ./build/pagecurlsolver_test",
+    "test:ts": "node --test --import=tsx 'src/**/*.test.ts'",
     "nitrogen": "npx nitrogen"
   },
   "keywords": [
@@ -36,9 +37,10 @@
     "react-native": ">=0.86.3"
   },
   "devDependencies": {
+    "@types/node": "^26.4.0",
+    "@types/react": "^18.3.0",
     "react-native-nitro-modules": "0.37.1",
-    "typescript": "^5.5.4",
-    "@types/react": "^18.3.0"
-  },
-  "dependencies": {}
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3"
+  }
 }

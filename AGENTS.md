@@ -22,7 +22,9 @@ npm run typecheck
 
 - Phase 0: decided.
 - Phase 1: `PageCurlSolver` C++ core implemented with Catch2 golden-file tests.
-- Phase 2+: not started.
+- Phase 2: `PositionResolver` + paginators implemented; fixed and reflowable
+  single→spread→single round-trips pass at three font sizes.
+- Phase 3+: not started.
 
 ## References
 
