@@ -6,6 +6,9 @@ export interface SpreadPages {
   fromRight: SkImage | null;
   toLeft: SkImage | null;
   toRight: SkImage | null;
+  /** The spread behind the current one, so a backward turn has a destination. */
+  prevLeft: SkImage | null;
+  prevRight: SkImage | null;
 }
 
 interface PageState {
@@ -18,6 +21,8 @@ const EMPTY: SpreadPages = {
   fromRight: null,
   toLeft: null,
   toRight: null,
+  prevLeft: null,
+  prevRight: null,
 };
 
 /**

@@ -18,6 +18,8 @@ uniform shader fromLeft;
 uniform shader fromRight;
 uniform shader toLeft;
 uniform shader toRight;
+uniform shader prevLeft;
+uniform shader prevRight;
 
 uniform float progress;
 uniform float2 resolution;
@@ -39,8 +41,13 @@ half4 getFromColor(float2 uv) {
   return p.x < halfW ? fromLeft.eval(p) : fromRight.eval(p);
 }
 
+// Turning forward reveals the next spread; turning back reveals the previous
+// one. Both are bound, and the direction picks which the curl uncovers.
 half4 getToColor(float2 uv) {
   float2 p = sheetToScreen(uv);
+  if (dir < 0.0) {
+    return p.x < halfW ? prevLeft.eval(p) : prevRight.eval(p);
+  }
   return p.x < halfW ? toLeft.eval(p) : toRight.eval(p);
 }
 

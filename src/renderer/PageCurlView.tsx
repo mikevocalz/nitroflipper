@@ -158,12 +158,21 @@ export function PageCurlView({
       if (cancelled) return;
       const toRight = await read(leafIndex + step);
       if (cancelled) return;
+      // The spread behind us, so a backward turn has something to uncover.
+      const prevLeft = spread ? await read(pageIndex - step) : null;
+      if (cancelled) return;
+      const prevRight = await read(leafIndex - step);
+      if (cancelled) return;
 
       // Hold only the four half-pages in use and free the rest. Evicting
       // from the map is not enough: without dispose() the native bitmap
       // stays alive, and a comic page is ~24MB, so paging through the book
       // starves the decoder and pages come back null (grey).
-      const keep = new Set([pageIndex, leafIndex, pageIndex + step, leafIndex + step]);
+      const keep = new Set([
+        pageIndex - step, leafIndex - step,
+        pageIndex, leafIndex,
+        pageIndex + step, leafIndex + step,
+      ]);
       for (const [key, img] of Array.from(cache.entries())) {
         if (!keep.has(key)) {
           cache.delete(key);
@@ -171,7 +180,7 @@ export function PageCurlView({
         }
       }
 
-      setPages({ fromLeft, fromRight, toLeft, toRight });
+      setPages({ fromLeft, fromRight, toLeft, toRight, prevLeft, prevRight });
       turning.value = false;
 
       // Warm the spread after this one while the reader is looking at the
@@ -314,6 +323,8 @@ export function PageCurlView({
                   {half(pages.fromRight, rightRect)}
                   {half(pages.toLeft, leftRect)}
                   {half(pages.toRight, rightRect)}
+                  {half(pages.prevLeft, leftRect)}
+                  {half(pages.prevRight, rightRect)}
                 </Shader>
               </Rect>
             ) : (
