@@ -112,11 +112,6 @@ export function PageCurlView({
 
   const canAdvance = pageIndex + step < source.pageCount;
 
-  // A new spread starts flat.
-  useEffect(() => {
-    progress.value = 0;
-  }, [pageIndex, progress]);
-
   // Four half-pages: the spread you are on and the one you are turning to.
   // The turning sheet spans both halves so the curl crosses the spine.
   // Per-instance vanilla store — two readers on one screen keep their own
@@ -126,12 +121,23 @@ export function PageCurlView({
   const pages = useStore(storeRef.current, (s) => s.pages);
   const setPages = storeRef.current.getState().setPages;
 
+  // Decoded pages are reused across turns: the spread you turn *to* becomes
+  // the spread you turn *from*, so re-decoding it costs ~24MB for nothing and
+  // the churn is what greys the page out after a few turns.
+  const cacheRef = useRef(new Map<number, SkImage>());
+
   useEffect(() => {
     let cancelled = false;
-    const read = async (index: number) =>
-      index >= 0 && index < source.pageCount
-        ? makeImageFromBytes(await source.readEntryBytes(index))
-        : null;
+    const cache = cacheRef.current;
+
+    const read = async (index: number) => {
+      if (index < 0 || index >= source.pageCount) return null;
+      const hit = cache.get(index);
+      if (hit) return hit;
+      const img = makeImageFromBytes(await source.readEntryBytes(index));
+      if (img) cache.set(index, img);
+      return img;
+    };
 
     (async () => {
       // Sequential, not Promise.all: a comic page decodes to ~24MB of RGBA
@@ -144,7 +150,18 @@ export function PageCurlView({
       if (cancelled) return;
       const toRight = await read(leafIndex + step);
       if (cancelled) return;
+
+      // Keep only the spread in hand and its neighbours either side.
+      const lo = pageIndex - step;
+      const hi = leafIndex + step;
+      for (const key of Array.from(cache.keys())) {
+        if (key < lo || key > hi) cache.delete(key);
+      }
+
       setPages({ fromLeft, fromRight, toLeft, toRight });
+      // Only now is it safe to lay the sheet flat: the page under the curl
+      // is already the page we are about to show, so there is no jump.
+      progress.value = 0;
     })();
     return () => {
       cancelled = true;
