@@ -21,7 +21,6 @@ import {
   type BoxedHybridObject,
 } from 'react-native-nitro-modules';
 
-import type { Frame } from '../../nitro/FlipperTypes';
 import type { PageCurlSolver } from '../../nitro/PageCurlSolver.nitro';
 import type { PageBox, PageSource } from '../types';
 import { shouldUseSpread } from '../pagination/SpreadPolicy';
@@ -61,63 +60,10 @@ type MutablePoint = { x: number; y: number };
 const EMPTY_POINTS: MutablePoint[] = [];
 
 /**
- * Vertex ids and triangle list for one face. The mesh topology is fixed for
- * the life of a solver, so this is computed once and reused every frame —
- * only the point coordinates change as the page curls.
- */
-interface Topology {
-  unique: Uint16Array;
-  triangles: number[];
-}
-
-function buildTopology(
-  frame: Frame,
-  rangeStart: number,
-  rangeCount: number,
-): Topology {
-  const indices = new Uint16Array(frame.indices);
-  const seen = new Map<number, number>();
-  const order: number[] = [];
-  for (let i = 0; i < rangeCount; i += 1) {
-    const idx = indices[rangeStart + i];
-    if (!seen.has(idx)) {
-      seen.set(idx, order.length);
-      order.push(idx);
-    }
-  }
-  const triangles = new Array<number>(rangeCount);
-  for (let i = 0; i < rangeCount; i += 1) {
-    triangles[i] = seen.get(indices[rangeStart + i])!;
-  }
-  return { unique: Uint16Array.from(order), triangles };
-}
-
-/** Allocate the point objects for a face once; frames mutate them in place. */
-function allocPoints(count: number): MutablePoint[] {
-  const points = new Array<MutablePoint>(count);
-  for (let i = 0; i < count; i += 1) points[i] = { x: 0, y: 0 };
-  return points;
-}
-
-/**
  * Write the frame's positions into `verts`. The array and its point objects
  * are reused across frames — the whole point is to allocate nothing on the
  * animation path.
  */
-function writePositions(
-  positions: Float32Array,
-  topology: Topology,
-  verts: MutablePoint[],
-): void {
-  const unique = topology.unique;
-  for (let i = 0; i < unique.length; i += 1) {
-    const idx = unique[i] * 2;
-    const p = verts[i];
-    p.x = positions[idx];
-    p.y = positions[idx + 1];
-  }
-}
-
 /**
  * Texture coords are fixed for the life of the mesh: the solver's UVs never
  * change, only the positions do. Computed once per solver.
@@ -125,22 +71,6 @@ function writePositions(
  * Skia samples them in the ImageShader's drawing space, not normalized
  * [0,1], so they are scaled to the page rect.
  */
-function buildTextures(
-  frame: Frame,
-  topology: Topology,
-  texWidth: number,
-  texHeight: number,
-): MutablePoint[] {
-  const uvs = new Float32Array(frame.uvs);
-  const unique = topology.unique;
-  const texs = new Array<MutablePoint>(unique.length);
-  for (let i = 0; i < unique.length; i += 1) {
-    const idx = unique[i] * 2;
-    texs[i] = { x: uvs[idx] * texWidth, y: uvs[idx + 1] * texHeight };
-  }
-  return texs;
-}
-
 export function PageCurlView({
   source,
   pageIndex,
@@ -162,23 +92,21 @@ export function PageCurlView({
   const [leftImage, setLeftImage] = useState<SkImage | null>(null);
   // The mesh lives in shared values, not React state: Skia reads them on the
   // UI thread, so a curl frame costs no React render and no reconciliation.
-  const frontVerts = useSharedValue<MutablePoint[]>(EMPTY_POINTS);
+  // One deformed point array shared by both faces; the UVs differ (the back
+  // is mirrored) and the triangle lists are re-split by facing every frame.
+  const meshVerts = useSharedValue<MutablePoint[]>(EMPTY_POINTS);
   const frontTex = useSharedValue<MutablePoint[]>(EMPTY_POINTS);
-  const backVerts = useSharedValue<MutablePoint[]>(EMPTY_POINTS);
   const backTex = useSharedValue<MutablePoint[]>(EMPTY_POINTS);
-  // Triangle lists are topology, so they only change when the solver does.
-  const [indices, setIndices] = useState<{ front: number[]; back: number[] }>({
-    front: [],
-    back: [],
-  });
+  const meshTriangles = useSharedValue<number[]>([]);
+  const frontIndices = useSharedValue<number[]>([]);
+  const backIndices = useSharedValue<number[]>([]);
+  const [hasMesh, setHasMesh] = useState(false);
   // Everything the frame loop touches lives in shared values, so the loop
   // itself can run entirely on the UI thread.
   const grabbing = useSharedValue(false);
   // Gates the always-on frame callback; setActive() can't be called from
   // inside a worklet without freezing the callback object.
   const animating = useSharedValue(false);
-  const frontIds = useSharedValue<number[]>([]);
-  const backIds = useSharedValue<number[]>([]);
   const boxedSolver = useSharedValue<BoxedHybridObject<PageCurlSolver> | null>(
     null,
   );
@@ -257,24 +185,44 @@ export function PageCurlView({
     // Fresh flat frame for the new page — otherwise the previous page's
     // fully-curled mesh lingers until the next grab.
     const flat = solver.tick(0);
-    const front = buildTopology(flat, flat.frontRangeStart, flat.frontRangeCount);
-    const back = buildTopology(flat, flat.backRangeStart, flat.backRangeCount);
-    frontIds.value = Array.from(front.unique);
-    backIds.value = Array.from(back.unique);
-    boxedSolver.value = NitroModules.box(solver);
-
-    // Points and UVs are allocated once per solver and then mutated in place.
-    const fv = allocPoints(front.unique.length);
-    const bv = allocPoints(back.unique.length);
     const positions = new Float32Array(flat.positions);
-    writePositions(positions, front, fv);
-    writePositions(positions, back, bv);
+    const uvs = new Float32Array(flat.uvs);
+    const allIndices = new Uint16Array(flat.indices);
+    // Front and back copies share positions, so one point array serves both.
+    const count = positions.length >> 2;
 
-    frontVerts.value = fv;
-    backVerts.value = bv;
-    frontTex.value = buildTextures(flat, front, box.width, box.height);
-    backTex.value = buildTextures(flat, back, box.width, box.height);
-    setIndices({ front: front.triangles, back: back.triangles });
+    const verts = new Array<MutablePoint>(count);
+    const fTex = new Array<MutablePoint>(count);
+    const bTex = new Array<MutablePoint>(count);
+    for (let i = 0; i < count; i += 1) {
+      verts[i] = { x: positions[i * 2], y: positions[i * 2 + 1] };
+      // Skia samples texture coords in the shader's drawing space, not
+      // normalized [0,1]. The back copy carries the mirrored UVs.
+      fTex[i] = {
+        x: uvs[i * 2] * box.width,
+        y: uvs[i * 2 + 1] * box.height,
+      };
+      const b = (i + count) * 2;
+      bTex[i] = { x: uvs[b] * box.width, y: uvs[b + 1] * box.height };
+    }
+
+    // Only the front half of the index buffer is kept: the back half is the
+    // same triangles with reversed winding, and facing is decided per frame.
+    const tris = Array.from(
+      allIndices.subarray(
+        flat.frontRangeStart,
+        flat.frontRangeStart + flat.frontRangeCount,
+      ),
+    );
+
+    meshVerts.value = verts;
+    frontTex.value = fTex;
+    backTex.value = bTex;
+    meshTriangles.value = tris;
+    frontIndices.value = tris;
+    backIndices.value = [];
+    boxedSolver.value = NitroModules.box(solver);
+    setHasMesh(true);
 
     return () => {
       solverRef.current = null;
@@ -327,21 +275,43 @@ export function PageCurlView({
     const frame = solver.tick(dt);
 
     const positions = new Float32Array(frame.positions);
-    const fIds = frontIds.value;
-    const bIds = backIds.value;
+    const tris = meshTriangles.value;
+    // Front and back copies of every vertex share a position; only the UVs
+    // differ, so one deformed point array feeds both faces.
+    const count = positions.length >> 2;
 
-    const fv = new Array(fIds.length);
-    for (let i = 0; i < fIds.length; i += 1) {
-      const idx = fIds[i] * 2;
-      fv[i] = { x: positions[idx], y: positions[idx + 1] };
+    const verts = new Array(count);
+    for (let i = 0; i < count; i += 1) {
+      const p = i * 2;
+      verts[i] = { x: positions[p], y: positions[p + 1] };
     }
-    const bv = new Array(bIds.length);
-    for (let i = 0; i < bIds.length; i += 1) {
-      const idx = bIds[i] * 2;
-      bv[i] = { x: positions[idx], y: positions[idx + 1] };
+
+    // Split the mesh by facing. Skia has no depth buffer, so without this the
+    // triangles that have folded over still paint in index order and slice
+    // through the art. A triangle whose winding has flipped is showing the
+    // sheet's reverse, and the folded flap lies ON TOP of the flat page, so
+    // it is drawn after.
+    const frontTris: number[] = [];
+    const backTris: number[] = [];
+    for (let t = 0; t < tris.length; t += 3) {
+      const a = tris[t];
+      const b = tris[t + 1];
+      const c = tris[t + 2];
+      const ax = positions[a * 2];
+      const ay = positions[a * 2 + 1];
+      const area =
+        (positions[b * 2] - ax) * (positions[c * 2 + 1] - ay) -
+        (positions[c * 2] - ax) * (positions[b * 2 + 1] - ay);
+      if (area >= 0) {
+        frontTris.push(a, b, c);
+      } else {
+        backTris.push(a, b, c);
+      }
     }
-    frontVerts.value = fv;
-    backVerts.value = bv;
+
+    meshVerts.value = verts;
+    frontIndices.value = frontTris;
+    backIndices.value = backTris;
 
     // Once the finger is up, stop when the spring settles; committing a page
     // is the only hop back to JS, and it happens once per turn.
@@ -429,26 +399,9 @@ export function PageCurlView({
                 fit="fill"
               />
             )}
-            {/* Back of the curling page (shows next page) */}
-            {indices.back.length > 0 && nextImage && currentImage && (
-              <Group>
-                <ImageShader
-                  image={nextImage}
-                  tx="clamp"
-                  ty="clamp"
-                  fit="fill"
-                  rect={{ x: 0, y: 0, width: box.width, height: box.height }}
-                />
-                <Vertices
-                  mode="triangles"
-                  vertices={backVerts}
-                  textures={backTex}
-                  indices={indices.back}
-                />
-              </Group>
-            )}
-            {/* Front of the curling page (shows current page) */}
-            {indices.front.length > 0 && currentImage && (
+            {/* The flat page. Triangles that have folded over are excluded
+                here and drawn as the flap below, so nothing z-fights. */}
+            {hasMesh && currentImage && (
               <Group>
                 <ImageShader
                   image={currentImage}
@@ -459,9 +412,28 @@ export function PageCurlView({
                 />
                 <Vertices
                   mode="triangles"
-                  vertices={frontVerts}
+                  vertices={meshVerts}
                   textures={frontTex}
-                  indices={indices.front}
+                  indices={frontIndices}
+                />
+              </Group>
+            )}
+            {/* The folded-over flap: the reverse of the same sheet, lying on
+                top of the page it just lifted off. */}
+            {hasMesh && nextImage && (
+              <Group>
+                <ImageShader
+                  image={nextImage}
+                  tx="clamp"
+                  ty="clamp"
+                  fit="fill"
+                  rect={{ x: 0, y: 0, width: box.width, height: box.height }}
+                />
+                <Vertices
+                  mode="triangles"
+                  vertices={meshVerts}
+                  textures={backTex}
+                  indices={backIndices}
                 />
               </Group>
             )}

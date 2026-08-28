@@ -195,3 +195,37 @@ TEST_CASE("Crossed threshold flag fires once", "[PageCurlSolver]") {
   f = solver.tick(0.0f);
   CHECK(f.crossedThreshold == false);
 }
+
+TEST_CASE("Slow drag past halfway commits the turn", "[PageCurlSolver]") {
+  Config cfg;
+  cfg.mode = Mode::Single;
+  cfg.spine = {Axis::Vertical, 0.0f};
+  cfg.meshCols = 8;
+  cfg.meshRows = 8;
+
+  auto settle = [](PageCurlSolver& s) {
+    Frame f = s.tick(0.016f);
+    for (int i = 0; i < 400 && f.progress > 0.001f && f.progress < 0.999f; ++i) {
+      f = s.tick(0.016f);
+    }
+    return f.progress;
+  };
+
+  // Dragged 70% across and let go gently: the page should fall open.
+  {
+    PageCurlSolver solver(200.0f, 300.0f, cfg);
+    REQUIRE(solver.beginGrab(200.0f, 150.0f));
+    solver.updateGrab(60.0f, 150.0f);
+    solver.release(0.0f, 0.0f);
+    CHECK(settle(solver) == Catch::Approx(1.0f).margin(1e-3f));
+  }
+
+  // Barely moved and let go gently: it springs back.
+  {
+    PageCurlSolver solver(200.0f, 300.0f, cfg);
+    REQUIRE(solver.beginGrab(200.0f, 150.0f));
+    solver.updateGrab(180.0f, 150.0f);
+    solver.release(0.0f, 0.0f);
+    CHECK(settle(solver) == Catch::Approx(0.0f).margin(1e-3f));
+  }
+}

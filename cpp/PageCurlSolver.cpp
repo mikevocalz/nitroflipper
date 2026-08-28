@@ -13,6 +13,7 @@ constexpr float kPi = 3.14159265358979323846f;
 // harism's CurlView behave; a fixed book-space band is a sliver on a big page.
 constexpr float kGrabBandFraction = 1.0f;
 constexpr float kReleaseSpeedThreshold = 400.0f; // book-space units / s
+constexpr float kCommitThreshold = 0.5f;      // drag past halfway and it turns
 constexpr float kMinTheta = 0.15f;            // ~8.6 degrees, fully curled
 constexpr float kApexMargin = 1.5f;           // keep the cone apex outside the page
 constexpr float kSpring = 25.0f;
@@ -316,7 +317,15 @@ void PageCurlSolver::release(float vx, float vy) {
   const bool fastEnough = speed > kReleaseSpeedThreshold;
   const bool towardCommit = directional < 0.0f;
 
-  _targetProgress = (fastEnough && towardCommit) ? 1.0f : 0.0f;
+  // A flick commits (or cancels) regardless of how far it got; otherwise the
+  // page falls to whichever side it was dragged past. Without the positional
+  // rule a slow, deliberate drag all the way across still springs back, which
+  // reads as the page refusing to turn.
+  if (fastEnough) {
+    _targetProgress = towardCommit ? 1.0f : 0.0f;
+  } else {
+    _targetProgress = _progress > kCommitThreshold ? 1.0f : 0.0f;
+  }
   _velocityProgress = 0.0f;
 }
 
