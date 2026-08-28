@@ -33,7 +33,16 @@ target_link_libraries(pagecurlsolver_test PRIVATE pagecurlsolver Catch2::Catch2W
 add_executable(comicarchive_test tests/ComicArchive.test.cpp)
 target_link_libraries(comicarchive_test PRIVATE comicarchive Catch2::Catch2WithMain)
 
+add_library(imagescaler cpp/ImageScaler.cpp)
+target_include_directories(imagescaler PUBLIC cpp cpp/vendor/stb)
+
+add_executable(imagescaler_test tests/ImageScaler.test.cpp)
+target_link_libraries(imagescaler_test PRIVATE imagescaler Catch2::Catch2WithMain)
+target_compile_definitions(imagescaler_test
+  PRIVATE FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/output/pages")
+
 include(CTest)
 enable_testing()
 add_test(NAME pagecurlsolver COMMAND pagecurlsolver_test)
 add_test(NAME comicarchive COMMAND comicarchive_test)
+add_test(NAME imagescaler COMMAND imagescaler_test)
