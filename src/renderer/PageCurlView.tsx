@@ -187,9 +187,6 @@ export function PageCurlView({
       // current pages, so a turn never waits on a decode.
       void read(leafIndex + step + 1);
       if (!cancelled) void read(leafIndex + step + 2);
-      // Only now is it safe to lay the sheet flat: the page under the curl
-      // is already the page we are about to show, so there is no jump.
-      progress.value = 0;
     })();
     return () => {
       cancelled = true;
@@ -216,6 +213,16 @@ export function PageCurlView({
   // True from the moment a turn commits until its pages are on screen, so a
   // second swipe cannot commit again and skip a spread.
   const turning = useSharedValue(false);
+
+  // Lay the sheet flat only after React has committed the new pages. Doing
+  // it in the loader resets progress on the UI thread while the OLD textures
+  // are still bound, which shows the previous spread flat for a frame — the
+  // blink on a turn.
+  useEffect(() => {
+    if (pages.fromRight == null) return;
+    progress.value = 0;
+    turning.value = false;
+  }, [pages, progress, turning]);
 
   const uniforms = useDerivedValue(() => ({
     progress: progress.value,
