@@ -14,18 +14,34 @@
  * `progress` runs 0 (flat) to 1 (fully turned).
  */
 export const PAGE_CURL_SKSL = `
-uniform shader image1;
-uniform shader image2;
+uniform shader fromLeft;
+uniform shader fromRight;
+uniform shader toLeft;
+uniform shader toRight;
 
 uniform float progress;
 uniform float2 resolution;
+uniform float halfW;
+// 1 = turning forward (right leaf lifts), -1 = turning back (left leaf lifts).
+uniform float dir;
+
+// The sheet spans the whole spread so the curl can travel across the spine
+// onto the other page, the way a real leaf does. Each half is a separate
+// image, so no offscreen compositing is needed.
+float2 sheetToScreen(float2 uv) {
+  float2 p = uv;
+  if (dir < 0.0) { p.x = 1.0 - p.x; }
+  return p * resolution;
+}
 
 half4 getFromColor(float2 uv) {
-  return image1.eval(uv * resolution);
+  float2 p = sheetToScreen(uv);
+  return p.x < halfW ? fromLeft.eval(p) : fromRight.eval(p);
 }
 
 half4 getToColor(float2 uv) {
-  return image2.eval(uv * resolution);
+  float2 p = sheetToScreen(uv);
+  return p.x < halfW ? toLeft.eval(p) : toRight.eval(p);
 }
 
 const float MIN_AMOUNT = -0.16;
@@ -213,6 +229,8 @@ vec4 transition(vec2 p) {
 
 half4 main(vec2 xy) {
   vec2 uv = xy / resolution;
+  // Turning back is the same curl mirrored about the spine.
+  if (dir < 0.0) { uv.x = 1.0 - uv.x; }
   return half4(transition(uv));
 }
 `;

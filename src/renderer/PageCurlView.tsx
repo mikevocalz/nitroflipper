@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { View } from 'react-native';
 import {
   Canvas,
@@ -18,10 +18,12 @@ import {
   withTiming,
 } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
+import { useStore } from 'zustand';
 
 import type { PageBox, PageSource } from '../types';
 import { shouldUseSpread } from '../pagination/SpreadPolicy';
 import { PAGE_CURL_SKSL } from './pageCurlShader';
+import { createPageStore, type PageStore } from './pageStore';
 
 interface PageCurlViewProps {
   source: PageSource;
@@ -57,10 +59,6 @@ export function PageCurlView({
   spread: spreadProp,
   gutter = 0,
 }: PageCurlViewProps) {
-  const [currentImage, setCurrentImage] = useState<SkImage | null>(null);
-  const [nextImage, setNextImage] = useState<SkImage | null>(null);
-  const [leftImage, setLeftImage] = useState<SkImage | null>(null);
-
   // The whole animation is one scalar on the UI thread. The curl itself is
   // evaluated per pixel by the shader, so a frame costs no JS at all.
   const progress = useSharedValue(0);
@@ -123,7 +121,15 @@ export function PageCurlView({
     progress.value = 0;
   }, [pageIndex, progress]);
 
-  // Textures: the page being turned, what is under it, and the static verso.
+  // Four half-pages: the spread you are on and the one you are turning to.
+  // The turning sheet spans both halves so the curl crosses the spine.
+  // Per-instance vanilla store — two readers on one screen keep their own
+  // pages, and no component state lives in React.
+  const storeRef = useRef<PageStore | null>(null);
+  if (storeRef.current == null) storeRef.current = createPageStore();
+  const pages = useStore(storeRef.current, (s) => s.pages);
+  const setPages = storeRef.current.getState().setPages;
+
   useEffect(() => {
     let cancelled = false;
     const read = async (index: number) =>
@@ -134,106 +140,140 @@ export function PageCurlView({
     (async () => {
       // Sequential, not Promise.all: a comic page decodes to ~24MB of RGBA
       // and decoding several at once can fail the allocation silently.
-      const front = await read(leafIndex);
+      const fromLeft = spread ? await read(pageIndex) : null;
       if (cancelled) return;
-      const under = await read(leafIndex + 1);
+      const fromRight = await read(leafIndex);
       if (cancelled) return;
-      const left = spread ? await read(pageIndex) : null;
+      const toLeft = spread ? await read(pageIndex + step) : null;
       if (cancelled) return;
-      setCurrentImage(front);
-      setNextImage(under ?? front);
-      setLeftImage(left);
+      const toRight = await read(leafIndex + step);
+      if (cancelled) return;
+      setPages({ fromLeft, fromRight, toLeft, toRight });
     })();
     return () => {
       cancelled = true;
     };
-  }, [source, pageIndex, leafIndex, spread]);
+  }, [source, pageIndex, leafIndex, spread, step]);
+
+  // The sheet covers both halves; each image sits in its own half.
+  const sheetW = spread ? leftFit.w + gutter + leafFit.w : leafFit.w;
+  const sheetH = Math.max(leftFit.h, leafFit.h);
+  const sheetX = spread ? leftTx : leafTx;
+  const sheetY = spread ? Math.min(leftTy, leafTy) : leafTy;
+  const halfW = spread ? leftFit.w + gutter / 2 : leafFit.w;
+  const leftRect = { x: 0, y: leftTy - sheetY, width: leftFit.w, height: leftFit.h };
+  const rightRect = {
+    x: sheetW - leafFit.w,
+    y: leafTy - sheetY,
+    width: leafFit.w,
+    height: leafFit.h,
+  };
+  const sheetRect = { x: 0, y: 0, width: sheetW, height: sheetH };
+
+  // -1 while turning back, so the same curl runs mirrored about the spine.
+  const dir = useSharedValue(1);
 
   const uniforms = useDerivedValue(() => ({
     progress: progress.value,
-    resolution: [leafFit.w, leafFit.h],
+    resolution: [sheetW, sheetH],
+    halfW,
+    dir: dir.value,
   }));
 
   // Drag maps travel across the leaf to curl progress; release either falls
   // open or springs back. All of it stays on the UI thread.
+  const canGoBack = pageIndex - step >= 0;
+  const goBack = useCallback(() => {
+    onPageIndexChange?.(pageIndex - step);
+  }, [onPageIndexChange, pageIndex, step]);
+
+  // Books turn both ways: dragging in from the outer edge turns forward,
+  // dragging out from the spine side pulls the previous leaf back.
   const pan = Gesture.Pan()
+    .onBegin((event) => {
+      'worklet';
+      const forward = rtl
+        ? event.x < sheetX + sheetW / 2
+        : event.x > sheetX + sheetW / 2;
+      dir.value = forward ? 1 : -1;
+      progress.value = 0;
+    })
     .onUpdate((event) => {
       'worklet';
-      if (!canAdvance) return;
-      const travel = rtl ? event.translationX : -event.translationX;
-      progress.value = Math.min(Math.max(travel / leafFit.w, 0), 1);
+      const forward = dir.value > 0;
+      if (forward ? !canAdvance : !canGoBack) return;
+      // Forward drags travel toward the spine, back drags away from it.
+      const travel = forward
+        ? rtl
+          ? event.translationX
+          : -event.translationX
+        : rtl
+          ? -event.translationX
+          : event.translationX;
+      progress.value = Math.min(Math.max(travel / (sheetW / 2), 0), 1);
     })
     .onEnd((event) => {
       'worklet';
-      if (!canAdvance) return;
-      const away = rtl ? event.velocityX : -event.velocityX;
+      const forward = dir.value > 0;
+      if (forward ? !canAdvance : !canGoBack) return;
+      const away = forward
+        ? rtl
+          ? event.velocityX
+          : -event.velocityX
+        : rtl
+          ? -event.velocityX
+          : event.velocityX;
       const flicked = Math.abs(away) > FLICK_VELOCITY;
       const commit = flicked ? away > 0 : progress.value > COMMIT_AT;
 
       if (commit) {
-        progress.value = withTiming(1, { duration: 260 }, (finished) => {
+        progress.value = withTiming(1, { duration: 280 }, (finished) => {
           'worklet';
-          if (finished) scheduleOnRN(commitTurn);
+          if (finished) scheduleOnRN(forward ? commitTurn : goBack);
         });
       } else {
         progress.value = withSpring(0, { damping: 20, stiffness: 180 });
       }
     });
 
-  const pageRect = { x: 0, y: 0, width: leafFit.w, height: leafFit.h };
+  const half = (img: SkImage | null, rect: typeof leftRect) =>
+    img ? (
+      <ImageShader image={img} fit="fill" rect={rect} tx="clamp" ty="clamp" />
+    ) : (
+      // A missing half (the outer edge of the book) reads as blank stock.
+      <ImageShader
+        image={pages.fromRight ?? img!}
+        fit="fill"
+        rect={{ ...rect, width: 0, height: 0 }}
+        tx="clamp"
+        ty="clamp"
+      />
+    );
+
+  const ready = effect && pages.fromRight;
 
   return (
     <View style={{ width, height }}>
       <GestureDetector gesture={pan}>
         <Canvas style={{ width, height }}>
-          {/* Static verso page — the half that never turns. */}
-          {spread && leftImage && (
-            <Group transform={[{ translateX: leftTx }, { translateY: leftTy }]}>
-              <Image
-                image={leftImage}
-                x={0}
-                y={0}
-                width={leftFit.w}
-                height={leftFit.h}
-                fit="fill"
-              />
-            </Group>
-          )}
-          {/* The turning leaf. Local space is the page rect, so the shader's
-              xy and `resolution` agree. */}
-          <Group
-            transform={[{ translateX: leafTx }, { translateY: leafTy }]}
-            clip={pageRect}
-          >
-            {/* Rect, not Fill: Fill would run the curl maths over the whole
-                canvas, and the page is well under half of it. */}
-            {effect && currentImage && nextImage ? (
-              <Rect {...pageRect}>
+          <Group transform={[{ translateX: sheetX }, { translateY: sheetY }]}>
+            {ready ? (
+              <Rect {...sheetRect}>
                 <Shader source={effect} uniforms={uniforms}>
-                  <ImageShader
-                    image={currentImage}
-                    fit="fill"
-                    rect={pageRect}
-                    tx="clamp"
-                    ty="clamp"
-                  />
-                  <ImageShader
-                    image={nextImage}
-                    fit="fill"
-                    rect={pageRect}
-                    tx="clamp"
-                    ty="clamp"
-                  />
+                  {half(pages.fromLeft, leftRect)}
+                  {half(pages.fromRight, rightRect)}
+                  {half(pages.toLeft, leftRect)}
+                  {half(pages.toRight, rightRect)}
                 </Shader>
               </Rect>
             ) : (
-              currentImage && (
+              pages.fromRight && (
                 <Image
-                  image={currentImage}
-                  x={0}
-                  y={0}
-                  width={leafFit.w}
-                  height={leafFit.h}
+                  image={pages.fromRight}
+                  x={rightRect.x}
+                  y={rightRect.y}
+                  width={rightRect.width}
+                  height={rightRect.height}
                   fit="fill"
                 />
               )
