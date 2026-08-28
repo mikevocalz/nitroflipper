@@ -286,19 +286,19 @@ export function PageCurlView({
       }
     });
 
-  const half = (img: SkImage | null, rect: typeof leftRect) =>
-    img ? (
-      <ImageShader image={img} fit="fill" rect={rect} tx="clamp" ty="clamp" />
-    ) : (
-      // A missing half (the outer edge of the book) reads as blank stock.
-      <ImageShader
-        image={pages.fromRight ?? img!}
-        fit="fill"
-        rect={{ ...rect, width: 0, height: 0 }}
-        tx="clamp"
-        ty="clamp"
-      />
-    );
+  // Every shader slot must be a real image. A zero-sized ImageShader makes
+  // the whole runtime effect draw nothing, which is why the last spread of a
+  // book came out blank: past the final leaf there is no "to" spread, so two
+  // of the four slots had nothing to bind.
+  const half = (img: SkImage | null, rect: typeof leftRect) => (
+    <ImageShader
+      image={img ?? pages.fromRight!}
+      fit="fill"
+      rect={rect}
+      tx="clamp"
+      ty="clamp"
+    />
+  );
 
   const ready = effect && pages.fromRight;
 
