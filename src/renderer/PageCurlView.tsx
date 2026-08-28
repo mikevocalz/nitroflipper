@@ -92,7 +92,9 @@ export function PageCurlView({
 
   // A normal page shown alone still belongs in one display half — centering
   // it would straddle a fold. A true double-width page may span both.
-  const soloInHalf = !spread && fitsTwoUp(box);
+  // A page shown alone gets the whole viewport. Confining it to one half
+  // leaves the other half dead black, which reads as a broken render.
+  const soloInHalf = false;
   const rtl = source.progressionDirection === 'rtl';
 
   const halfWidth = spread || soloInHalf ? (width - gutter) / 2 : width;
