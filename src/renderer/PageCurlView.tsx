@@ -192,19 +192,6 @@ export function PageCurlView({
       if (cancelled) return;
       const fromRight = await read(leafIndex);
       if (cancelled) return;
-      // Publish the moment the two visible pages are in. Waiting for the
-      // destination and previous pairs too makes a button press sit dead for
-      // as long as a decode, even though what you are about to look at is
-      // already in hand.
-      setPages({
-        fromLeft,
-        fromRight,
-        toLeft: null,
-        toRight: null,
-        prevLeft: null,
-        prevRight: null,
-      });
-
       const toLeft = spread ? await read(pageIndex + step) : null;
       if (cancelled) return;
       const toRight = await read(leafIndex + step);
@@ -269,11 +256,15 @@ export function PageCurlView({
   // it in the loader resets progress on the UI thread while the OLD textures
   // are still bound, which shows the previous spread flat for a frame — the
   // blink on a turn.
+  // Keyed on the VISIBLE pair, not the whole pages object. The destination
+  // halves are published a moment later, and reacting to that second publish
+  // reset progress in the middle of an in-flight turn — which is a jump.
   useEffect(() => {
     if (pages.fromRight == null) return;
     progress.value = 0;
     turning.value = false;
-  }, [pages, progress, turning]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pages.fromLeft, pages.fromRight]);
 
   const uniforms = useDerivedValue(() => ({
     progress: progress.value,
