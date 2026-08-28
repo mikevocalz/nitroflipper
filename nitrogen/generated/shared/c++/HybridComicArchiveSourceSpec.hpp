@@ -71,6 +71,7 @@ namespace margelo::nitro::nitroflipper {
       virtual PageBox getPageBox(double index) = 0;
       virtual SpreadSlot getSpreadSlot(double index) = 0;
       virtual std::shared_ptr<Promise<std::shared_ptr<ArrayBuffer>>> readEntryBytes(double index) = 0;
+      virtual std::shared_ptr<Promise<std::shared_ptr<ArrayBuffer>>> readPageScaled(double index, double maxWidth, double maxHeight) = 0;
       virtual ComicPageLocator locatorForPage(double index) = 0;
 
     protected:

@@ -45,4 +45,10 @@ export interface PageSource {
   locatorForPage(index: number): Locator;
   pageForLocator(loc: Locator): number;
   readEntryBytes(index: number): Promise<ArrayBuffer>;
+  /** Page re-encoded to fit the given box, so pages are not held at source size. */
+  readPageScaled(
+    index: number,
+    maxWidth: number,
+    maxHeight: number,
+  ): Promise<ArrayBuffer>;
 }

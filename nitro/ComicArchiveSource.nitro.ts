@@ -32,6 +32,16 @@ export interface ComicArchiveSource
 
   /** Return the encoded image bytes for a page (JPEG/PNG/WebP). */
   readEntryBytes(index: number): Promise<ArrayBuffer>;
+  /**
+   * Read a page re-encoded to fit `maxWidth` x `maxHeight`. A source page is
+   * several times larger than the box it is drawn in, and holding pages at
+   * source resolution exhausts the image decoder while paging through a book.
+   */
+  readPageScaled(
+    index: number,
+    maxWidth: number,
+    maxHeight: number,
+  ): Promise<ArrayBuffer>;
 
   /** Return a canonical Readium Locator for the start of a page. */
   locatorForPage(index: number): ComicPageLocator;

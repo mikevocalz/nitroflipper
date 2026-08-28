@@ -1,6 +1,10 @@
 #include "HybridComicArchiveSource.hpp"
 
 #include <NitroModules/ArrayBuffer.hpp>
+
+#include <span>
+
+#include "ImageScaler.h"
 #include <NitroModules/Promise.hpp>
 
 namespace margelo::nitro::nitroflipper {
@@ -82,6 +86,28 @@ PageBox HybridComicArchiveSource::getPageBox(double index) {
 
 SpreadSlot HybridComicArchiveSource::getSpreadSlot(double index) {
   return toNitro(_archive.page(static_cast<size_t>(index)).slot);
+}
+
+std::shared_ptr<Promise<std::shared_ptr<ArrayBuffer>>>
+HybridComicArchiveSource::readPageScaled(
+    double index, double maxWidth, double maxHeight) {
+  return Promise<std::shared_ptr<ArrayBuffer>>::async(
+      [this, index, maxWidth, maxHeight]() {
+        auto bytes = _archive.readPageBytes(static_cast<size_t>(index));
+        auto scaled = ::nitroflipper::scaleEncodedImage(
+            std::span<const uint8_t>(
+                reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size()),
+            static_cast<int>(maxWidth),
+            static_cast<int>(maxHeight));
+        // A page we cannot decode still reads fine at source size; the caller
+        // gets the original rather than an error.
+        if (!scaled.has_value()) {
+          return ArrayBuffer::copy(
+              reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+        }
+        return ArrayBuffer::copy(
+            scaled->bytes.data(), scaled->bytes.size());
+      });
 }
 
 std::shared_ptr<Promise<std::shared_ptr<ArrayBuffer>>>

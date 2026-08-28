@@ -22,6 +22,8 @@ public:
   SpreadSlot getSpreadSlot(double index) override;
   std::shared_ptr<Promise<std::shared_ptr<ArrayBuffer>>> readEntryBytes(
       double index) override;
+  std::shared_ptr<Promise<std::shared_ptr<ArrayBuffer>>> readPageScaled(
+      double index, double maxWidth, double maxHeight) override;
   ComicPageLocator locatorForPage(double index) override;
 
 private:

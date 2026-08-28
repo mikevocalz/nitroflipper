@@ -22,6 +22,7 @@ namespace margelo::nitro::nitroflipper {
       prototype.registerHybridMethod("getPageBox", &HybridComicArchiveSourceSpec::getPageBox);
       prototype.registerHybridMethod("getSpreadSlot", &HybridComicArchiveSourceSpec::getSpreadSlot);
       prototype.registerHybridMethod("readEntryBytes", &HybridComicArchiveSourceSpec::readEntryBytes);
+      prototype.registerHybridMethod("readPageScaled", &HybridComicArchiveSourceSpec::readPageScaled);
       prototype.registerHybridMethod("locatorForPage", &HybridComicArchiveSourceSpec::locatorForPage);
     });
   }

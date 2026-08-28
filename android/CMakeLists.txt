@@ -16,6 +16,7 @@ target_sources(
   ../cpp/PageCurlSolver.cpp
   ../cpp/HybridPageCurlSolver.cpp
   ../cpp/ComicArchive.cpp
+  ../cpp/ImageScaler.cpp
   ../cpp/HybridComicArchiveSource.cpp
   ../cpp/vendor/miniz/miniz.c
 )
@@ -24,4 +25,5 @@ target_include_directories(
   NitroFlipper PRIVATE
   ../cpp
   ../cpp/vendor/miniz
+  ../cpp/vendor/stb
 )

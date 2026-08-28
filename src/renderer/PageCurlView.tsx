@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef } from 'react';
-import { View } from 'react-native';
+import { PixelRatio, View } from 'react-native';
 import {
   Canvas,
   Group,
@@ -130,11 +130,19 @@ export function PageCurlView({
     let cancelled = false;
     const cache = cacheRef.current;
 
+    // Decode at the size the page is drawn. A source page is several times
+    // the slot it lands in, and holding pages at source resolution is what
+    // starves the decoder while paging through a book.
+    const texW = Math.ceil(leafFit.w * PixelRatio.get());
+    const texH = Math.ceil(leafFit.h * PixelRatio.get());
+
     const read = async (index: number) => {
       if (index < 0 || index >= source.pageCount) return null;
       const hit = cache.get(index);
       if (hit) return hit;
-      const img = makeImageFromBytes(await source.readEntryBytes(index));
+      const img = makeImageFromBytes(
+        await source.readPageScaled(index, texW, texH),
+      );
       if (img) cache.set(index, img);
       return img;
     };
@@ -165,6 +173,11 @@ export function PageCurlView({
 
       setPages({ fromLeft, fromRight, toLeft, toRight });
       turning.value = false;
+
+      // Warm the spread after this one while the reader is looking at the
+      // current pages, so a turn never waits on a decode.
+      void read(leafIndex + step + 1);
+      if (!cancelled) void read(leafIndex + step + 2);
       // Only now is it safe to lay the sheet flat: the page under the curl
       // is already the page we are about to show, so there is no jump.
       progress.value = 0;

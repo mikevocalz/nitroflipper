@@ -77,4 +77,12 @@ export class ComicArchiveSource implements PageSource {
   readEntryBytes(index: number): Promise<ArrayBuffer> {
     return this.native.readEntryBytes(index);
   }
+
+  readPageScaled(
+    index: number,
+    maxWidth: number,
+    maxHeight: number,
+  ): Promise<ArrayBuffer> {
+    return this.native.readPageScaled(index, maxWidth, maxHeight);
+  }
 }

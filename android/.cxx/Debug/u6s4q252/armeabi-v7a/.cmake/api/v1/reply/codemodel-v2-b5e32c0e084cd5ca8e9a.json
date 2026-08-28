@@ -39,7 +39,7 @@
 				{
 					"directoryIndex" : 0,
 					"id" : "NitroFlipper::@6890427a1f51a3e7e1df",
-					"jsonFile" : "target-NitroFlipper-Debug-77e7be888f60f6a1d9d0.json",
+					"jsonFile" : "target-NitroFlipper-Debug-f06274c318c6807538a1.json",
 					"name" : "NitroFlipper",
 					"projectIndex" : 0
 				}
@@ -49,7 +49,7 @@
 	"kind" : "codemodel",
 	"paths" : 
 	{
-		"build" : "/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/android/.cxx/Debug/u6s4q252/arm64-v8a",
+		"build" : "/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/android/.cxx/Debug/u6s4q252/armeabi-v7a",
 		"source" : "/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/android"
 	},
 	"version" : 
