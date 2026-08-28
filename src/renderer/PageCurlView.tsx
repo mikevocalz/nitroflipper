@@ -328,7 +328,11 @@ export function PageCurlView({
     />
   );
 
-  const ready = effect && pages.fromRight;
+  // The visible halves must be genuinely loaded. The destination halves may
+  // fall back to a real image because they are only seen mid-curl, but doing
+  // that for a visible half draws the same page twice.
+  const ready =
+    effect && pages.fromRight != null && (!spread || pages.fromLeft != null);
 
   return (
     <View style={{ width, height }}>
