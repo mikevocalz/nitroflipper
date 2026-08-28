@@ -9,6 +9,8 @@ const singletons = [
   'react-native-nitro-modules',
   '@shopify/react-native-skia',
   'react-native-gesture-handler',
+  'react-native-reanimated',
+  'react-native-worklets',
 ];
 const root = path.resolve(__dirname, '..');
 

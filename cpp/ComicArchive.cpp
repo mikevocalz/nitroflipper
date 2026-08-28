@@ -362,11 +362,20 @@ std::vector<uint8_t> ComicArchive::readFirstBytes(uint32_t fileIndex, size_t max
   }
   size_t toRead = std::min(maxBytes, static_cast<size_t>(stat.m_uncomp_size));
   if (toRead == 0) return {};
+
+  // Stream the first bytes out: extract_to_mem demands a buffer big enough
+  // for the WHOLE entry, so it fails on any page larger than the probe and
+  // leaves the dimensions unknown.
+  mz_zip_reader_extract_iter_state* iter =
+      mz_zip_reader_extract_iter_new(archive, fileIndex, 0);
+  if (iter == nullptr) return {};
+
   std::vector<uint8_t> result(toRead);
-  if (!mz_zip_reader_extract_to_mem(
-          archive, fileIndex, result.data(), toRead, 0)) {
-    return {};
-  }
+  const size_t got =
+      mz_zip_reader_extract_iter_read(iter, result.data(), toRead);
+  mz_zip_reader_extract_iter_free(iter);
+
+  result.resize(got);
   return result;
 }
 

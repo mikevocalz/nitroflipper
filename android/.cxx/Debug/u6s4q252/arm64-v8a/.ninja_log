@@ -1,11 +1,13 @@
 # ninja log v5
-2	469	1787873088044799813	CMakeFiles/NitroFlipper.dir/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/cpp/vendor/miniz/miniz.c.o	e2d8ebb8cf11d10f
-0	903	1787873088480102784	CMakeFiles/NitroFlipper.dir/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/cpp/PageCurlSolver.cpp.o	d2e806eb90060726
-5	1658	1787873236634838500	CMakeFiles/NitroFlipper.dir/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/nitrogen/generated/shared/c++/HybridPageCurlSolverSpec.cpp.o	8d5f69446e49d111
-5	2554	1787873237483305153	CMakeFiles/NitroFlipper.dir/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/nitrogen/generated/shared/c++/HybridComicArchiveSourceSpec.cpp.o	5fffd3506e82cb21
-5	1233	1787873304406781441	CMakeFiles/NitroFlipper.dir/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/cpp/HybridPageCurlSolver.cpp.o	78d22d8eaab2bb12
-4	1410	1787873236393418168	CMakeFiles/NitroFlipper.dir/cpp-adapter.cpp.o	2422deda47cbb41f
-5	1541	1787873236519502801	CMakeFiles/NitroFlipper.dir/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/nitrogen/generated/android/NitroFlipperOnLoad.cpp.o	e397c69ac3c10325
+1855	2230	1787878556913835861	../../../../build/intermediates/cxx/Debug/u6s4q252/obj/arm64-v8a/libNitroFlipper.so	6acffee3721e1bd1
+4	1854	1787878556575131736	CMakeFiles/NitroFlipper.dir/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/cpp/ComicArchive.cpp.o	8fac45e72fd616be
 5	1394	1787873304564880581	CMakeFiles/NitroFlipper.dir/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/cpp/HybridComicArchiveSource.cpp.o	b9e24f61db57069c
-2	2057	1787873089621678916	CMakeFiles/NitroFlipper.dir/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/cpp/ComicArchive.cpp.o	8fac45e72fd616be
-1394	1705	1787873304869632252	../../../../build/intermediates/cxx/Debug/u6s4q252/obj/arm64-v8a/libNitroFlipper.so	6acffee3721e1bd1
+5	1541	1787873236519502801	CMakeFiles/NitroFlipper.dir/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/nitrogen/generated/android/NitroFlipperOnLoad.cpp.o	e397c69ac3c10325
+4	1410	1787873236393418168	CMakeFiles/NitroFlipper.dir/cpp-adapter.cpp.o	2422deda47cbb41f
+5	1233	1787873304406781441	CMakeFiles/NitroFlipper.dir/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/cpp/HybridPageCurlSolver.cpp.o	78d22d8eaab2bb12
+5	2554	1787873237483305153	CMakeFiles/NitroFlipper.dir/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/nitrogen/generated/shared/c++/HybridComicArchiveSourceSpec.cpp.o	5fffd3506e82cb21
+5	1658	1787873236634838500	CMakeFiles/NitroFlipper.dir/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/nitrogen/generated/shared/c++/HybridPageCurlSolverSpec.cpp.o	8d5f69446e49d111
+0	903	1787873088480102784	CMakeFiles/NitroFlipper.dir/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/cpp/PageCurlSolver.cpp.o	d2e806eb90060726
+2	469	1787873088044799813	CMakeFiles/NitroFlipper.dir/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/cpp/vendor/miniz/miniz.c.o	e2d8ebb8cf11d10f
+4	775	1787879635426083232	CMakeFiles/NitroFlipper.dir/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/cpp/PageCurlSolver.cpp.o	d2e806eb90060726
+775	1130	1787879635764327777	../../../../build/intermediates/cxx/Debug/u6s4q252/obj/arm64-v8a/libNitroFlipper.so	6acffee3721e1bd1

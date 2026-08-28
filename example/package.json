@@ -18,7 +18,9 @@
     "react-native-blob-util": "^0.21.0",
     "react-native-gesture-handler": "2.32.0",
     "react-native-nitro-modules": "0.37.1",
-    "react-native-safe-area-context": "^5.5.2"
+    "react-native-reanimated": "^4.6.0",
+    "react-native-safe-area-context": "^5.5.2",
+    "react-native-worklets": "^0.12.1"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",

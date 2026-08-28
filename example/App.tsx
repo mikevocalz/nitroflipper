@@ -18,7 +18,7 @@ import {
   type ComicArchiveSource,
 } from 'nitro-flipper';
 
-import ltrAsset from './src/assets/ltr.cbz';
+import ltrAsset from './src/assets/MMPR1.cbz';
 
 function useLocalArchive() {
   const [source, setSource] = useState<ComicArchiveSource | null>(null);

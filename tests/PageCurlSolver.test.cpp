@@ -111,12 +111,15 @@ TEST_CASE("Grab region hit-testing", "[PageCurlSolver]") {
 
   PageCurlSolver solver(200.0f, 300.0f, cfg);
 
-  // Inside the right-edge grab band.
+  // Near the active edge.
   CHECK(solver.beginGrab(170.0f, 50.0f) == true);
-  // Outside the band.
-  CHECK(solver.beginGrab(100.0f, 50.0f) == false);
-  // Above the page.
+  // Anywhere else on the leaf also starts a curl: the grab band spans the
+  // page so a reader can drag from the middle, not just a sliver at the edge.
+  CHECK(solver.beginGrab(100.0f, 50.0f) == true);
+  CHECK(solver.beginGrab(5.0f, 50.0f) == true);
+  // Off the page (past the far end) is still refused.
   CHECK(solver.beginGrab(195.0f, 310.0f) == false);
+  CHECK(solver.beginGrab(195.0f, -10.0f) == false);
 }
 
 TEST_CASE("Release physics commits on fast drag toward the opposite edge", "[PageCurlSolver]") {

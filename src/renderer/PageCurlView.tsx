@@ -10,37 +10,21 @@ import {
   type SkImage,
 } from '@shopify/react-native-skia';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import {
+  useFrameCallback,
+  useSharedValue,
+} from 'react-native-reanimated';
+import { scheduleOnRN } from 'react-native-worklets';
 
-import { NitroModules } from 'react-native-nitro-modules';
+import {
+  NitroModules,
+  type BoxedHybridObject,
+} from 'react-native-nitro-modules';
 
 import type { Frame } from '../../nitro/FlipperTypes';
 import type { PageCurlSolver } from '../../nitro/PageCurlSolver.nitro';
 import type { PageBox, PageSource } from '../types';
 import { shouldUseSpread } from '../pagination/SpreadPolicy';
-
-const EMPTY_FRAME: Frame = {
-  positions: new ArrayBuffer(0),
-  uvs: new ArrayBuffer(0),
-  indices: new ArrayBuffer(0),
-  frontRangeStart: 0,
-  frontRangeCount: 0,
-  backRangeStart: 0,
-  backRangeCount: 0,
-  staticHalfClipX: 0,
-  staticHalfClipY: 0,
-  staticHalfClipWidth: 0,
-  staticHalfClipHeight: 0,
-  hasGutterClip: false,
-  gutterClipX: 0,
-  gutterClipY: 0,
-  gutterClipWidth: 0,
-  gutterClipHeight: 0,
-  shadowPoly: new ArrayBuffer(0),
-  shadowAlpha: new ArrayBuffer(0),
-  spineShadowStrength: 0,
-  progress: 0,
-  crossedThreshold: false,
-};
 
 interface PageCurlViewProps {
   source: PageSource;
@@ -62,16 +46,19 @@ interface PageCurlViewProps {
   gutter?: number;
 }
 
+// ponytail: full-resolution decode. Downscaling to the slot via
+// Skia.Surface.MakeOffscreen renders blank on Android (the snapshot doesn't
+// survive to the render thread) — do it at decode time if this becomes the
+// bottleneck again.
 function makeImageFromBytes(bytes: ArrayBuffer) {
   const data = Skia.Data.fromBytes(new Uint8Array(bytes));
   return Skia.Image.MakeImageFromEncoded(data);
 }
 
-interface VertexSlice {
-  vertices: { x: number; y: number }[];
-  textures: { x: number; y: number }[];
-  indices: number[];
-}
+/** Skia's SkPoint is readonly; we mutate our own buffers in place. */
+type MutablePoint = { x: number; y: number };
+
+const EMPTY_POINTS: MutablePoint[] = [];
 
 /**
  * Vertex ids and triangle list for one face. The mesh topology is fixed for
@@ -105,38 +92,53 @@ function buildTopology(
   return { unique: Uint16Array.from(order), triangles };
 }
 
-function buildVertices(
+/** Allocate the point objects for a face once; frames mutate them in place. */
+function allocPoints(count: number): MutablePoint[] {
+  const points = new Array<MutablePoint>(count);
+  for (let i = 0; i < count; i += 1) points[i] = { x: 0, y: 0 };
+  return points;
+}
+
+/**
+ * Write the frame's positions into `verts`. The array and its point objects
+ * are reused across frames — the whole point is to allocate nothing on the
+ * animation path.
+ */
+function writePositions(
+  positions: Float32Array,
+  topology: Topology,
+  verts: MutablePoint[],
+): void {
+  const unique = topology.unique;
+  for (let i = 0; i < unique.length; i += 1) {
+    const idx = unique[i] * 2;
+    const p = verts[i];
+    p.x = positions[idx];
+    p.y = positions[idx + 1];
+  }
+}
+
+/**
+ * Texture coords are fixed for the life of the mesh: the solver's UVs never
+ * change, only the positions do. Computed once per solver.
+ *
+ * Skia samples them in the ImageShader's drawing space, not normalized
+ * [0,1], so they are scaled to the page rect.
+ */
+function buildTextures(
   frame: Frame,
-  topology: Topology | null,
+  topology: Topology,
   texWidth: number,
   texHeight: number,
-): VertexSlice {
-  if (!topology || topology.unique.length === 0) {
-    return { vertices: [], textures: [], indices: [] };
-  }
-
-  const positions = new Float32Array(frame.positions);
+): MutablePoint[] {
   const uvs = new Float32Array(frame.uvs);
   const unique = topology.unique;
-
-  const verts = new Array<{ x: number; y: number }>(unique.length);
+  const texs = new Array<MutablePoint>(unique.length);
   for (let i = 0; i < unique.length; i += 1) {
-    const idx = unique[i];
-    verts[i] = { x: positions[idx * 2], y: positions[idx * 2 + 1] };
+    const idx = unique[i] * 2;
+    texs[i] = { x: uvs[idx] * texWidth, y: uvs[idx + 1] * texHeight };
   }
-  // Skia Vertices samples texture coords in the shader's drawing space, not
-  // normalized [0,1] — scale the solver's UVs to the page rect the
-  // ImageShader is fitted to.
-  const texs = new Array<{ x: number; y: number }>(unique.length);
-  for (let i = 0; i < unique.length; i += 1) {
-    const idx = unique[i];
-    texs[i] = {
-      x: uvs[idx * 2] * texWidth,
-      y: uvs[idx * 2 + 1] * texHeight,
-    };
-  }
-
-  return { vertices: verts, textures: texs, indices: topology.triangles };
+  return texs;
 }
 
 export function PageCurlView({
@@ -145,8 +147,10 @@ export function PageCurlView({
   onPageIndexChange,
   width,
   height,
-  meshCols = 24,
-  meshRows = 24,
+  // 16x16 is visually identical to a denser grid for a cone deformation and
+  // costs ~2.5x fewer vertices to rebuild per frame.
+  meshCols = 16,
+  meshRows = 16,
   spread: spreadProp,
   gutter = 0,
 }: PageCurlViewProps) {
@@ -156,12 +160,28 @@ export function PageCurlView({
   const [currentImage, setCurrentImage] = useState<SkImage | null>(null);
   const [nextImage, setNextImage] = useState<SkImage | null>(null);
   const [leftImage, setLeftImage] = useState<SkImage | null>(null);
-  const [frame, setFrame] = useState<Frame>(EMPTY_FRAME);
-  // Ref, not state: the rAF loop must see grab changes immediately without
-  // re-creating the closure mid-flight.
-  const grabbingRef = useRef(false);
-  // Mesh topology is fixed once the solver is built; only points move.
-  const topologyRef = useRef<{ front: Topology; back: Topology } | null>(null);
+  // The mesh lives in shared values, not React state: Skia reads them on the
+  // UI thread, so a curl frame costs no React render and no reconciliation.
+  const frontVerts = useSharedValue<MutablePoint[]>(EMPTY_POINTS);
+  const frontTex = useSharedValue<MutablePoint[]>(EMPTY_POINTS);
+  const backVerts = useSharedValue<MutablePoint[]>(EMPTY_POINTS);
+  const backTex = useSharedValue<MutablePoint[]>(EMPTY_POINTS);
+  // Triangle lists are topology, so they only change when the solver does.
+  const [indices, setIndices] = useState<{ front: number[]; back: number[] }>({
+    front: [],
+    back: [],
+  });
+  // Everything the frame loop touches lives in shared values, so the loop
+  // itself can run entirely on the UI thread.
+  const grabbing = useSharedValue(false);
+  // Gates the always-on frame callback; setActive() can't be called from
+  // inside a worklet without freezing the callback object.
+  const animating = useSharedValue(false);
+  const frontIds = useSharedValue<number[]>([]);
+  const backIds = useSharedValue<number[]>([]);
+  const boxedSolver = useSharedValue<BoxedHybridObject<PageCurlSolver> | null>(
+    null,
+  );
 
   const viewport = { width, height };
   const fitsTwoUp = (b: PageBox) => shouldUseSpread(viewport, b, 'auto');
@@ -216,8 +236,6 @@ export function PageCurlView({
         (rtl ? rightTx : leftTx)
       : (width - leafFit.w) / 2;
 
-  const rafRef = useRef<number | null>(null);
-  const lastTimeRef = useRef<number>(0);
 
   // Create a solver for this page size.
   useEffect(() => {
@@ -239,11 +257,24 @@ export function PageCurlView({
     // Fresh flat frame for the new page — otherwise the previous page's
     // fully-curled mesh lingers until the next grab.
     const flat = solver.tick(0);
-    topologyRef.current = {
-      front: buildTopology(flat, flat.frontRangeStart, flat.frontRangeCount),
-      back: buildTopology(flat, flat.backRangeStart, flat.backRangeCount),
-    };
-    setFrame(flat);
+    const front = buildTopology(flat, flat.frontRangeStart, flat.frontRangeCount);
+    const back = buildTopology(flat, flat.backRangeStart, flat.backRangeCount);
+    frontIds.value = Array.from(front.unique);
+    backIds.value = Array.from(back.unique);
+    boxedSolver.value = NitroModules.box(solver);
+
+    // Points and UVs are allocated once per solver and then mutated in place.
+    const fv = allocPoints(front.unique.length);
+    const bv = allocPoints(back.unique.length);
+    const positions = new Float32Array(flat.positions);
+    writePositions(positions, front, fv);
+    writePositions(positions, back, bv);
+
+    frontVerts.value = fv;
+    backVerts.value = bv;
+    frontTex.value = buildTextures(flat, front, box.width, box.height);
+    backTex.value = buildTextures(flat, back, box.width, box.height);
+    setIndices({ front: front.triangles, back: back.triangles });
 
     return () => {
       solverRef.current = null;
@@ -260,11 +291,13 @@ export function PageCurlView({
         : null;
 
     (async () => {
-      const [front, under, left] = await Promise.all([
-        read(leafIndex),
-        read(leafIndex + 1),
-        spread ? read(pageIndex) : Promise.resolve(null),
-      ]);
+      // Sequential, not Promise.all: a comic page decodes to ~24MB of RGBA,
+      // and decoding three at once can fail the allocation silently.
+      const front = await read(leafIndex);
+      if (cancelled) return;
+      const under = await read(leafIndex + 1);
+      if (cancelled) return;
+      const left = spread ? await read(pageIndex) : null;
       if (cancelled) return;
       setCurrentImage(front);
       setNextImage(under ?? front);
@@ -275,107 +308,85 @@ export function PageCurlView({
     };
   }, [source, pageIndex, leafIndex, spread]);
 
-  const canvasToSolver = useCallback(
-    (canvasX: number, canvasY: number) => ({
-      x: (canvasX - leafTx) / scale,
-      y: (canvasY - ty) / scale,
-    }),
-    [leafTx, ty, scale],
-  );
+  const canAdvance = pageIndex + step < source.pageCount;
+  const commitTurn = useCallback(() => {
+    onPageIndexChange?.(pageIndex + step);
+  }, [onPageIndexChange, pageIndex, step]);
 
-  const tick = useCallback(
-    (timestamp: number) => {
-      const solver = solverRef.current;
-      if (!solver) return;
+  // The animation loop runs on the UI thread: it ticks the solver through its
+  // boxed handle, writes the mesh into shared values in the same runtime, and
+  // never serializes a frame across the JS bridge.
+  useFrameCallback((info) => {
+    'worklet';
+    if (!animating.value) return;
+    const boxed = boxedSolver.value;
+    if (boxed == null) return;
+    const solver = boxed.unbox();
 
-      const dt = lastTimeRef.current
-        ? Math.min((timestamp - lastTimeRef.current) / 1000, 0.05)
-        : 0;
-      lastTimeRef.current = timestamp;
+    const dt = Math.min(info.timeSincePreviousFrame ?? 0, 50) / 1000;
+    const frame = solver.tick(dt);
 
-      const nextFrame = solver.tick(dt);
-      setFrame(nextFrame);
+    const positions = new Float32Array(frame.positions);
+    const fIds = frontIds.value;
+    const bIds = backIds.value;
 
-      // While the finger is down the loop must keep running; once released,
-      // stop when the spring settles at either extreme and commit at 1.
-      if (!grabbingRef.current) {
-        if (nextFrame.progress >= 0.999) {
-          if (pageIndex + step < source.pageCount) {
-            onPageIndexChange?.(pageIndex + step);
-          }
-          return;
-        }
-        if (nextFrame.progress <= 0.001) {
-          return;
-        }
-      }
-
-      rafRef.current = requestAnimationFrame(tick);
-    },
-    [onPageIndexChange, pageIndex, step, source.pageCount],
-  );
-
-  const startLoop = useCallback(() => {
-    lastTimeRef.current = 0;
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = requestAnimationFrame(tick);
-  }, [tick]);
-
-  const stopLoop = useCallback(() => {
-    if (rafRef.current) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = null;
+    const fv = new Array(fIds.length);
+    for (let i = 0; i < fIds.length; i += 1) {
+      const idx = fIds[i] * 2;
+      fv[i] = { x: positions[idx], y: positions[idx + 1] };
     }
-  }, []);
+    const bv = new Array(bIds.length);
+    for (let i = 0; i < bIds.length; i += 1) {
+      const idx = bIds[i] * 2;
+      bv[i] = { x: positions[idx], y: positions[idx + 1] };
+    }
+    frontVerts.value = fv;
+    backVerts.value = bv;
 
-  useEffect(() => {
-    return () => stopLoop();
-  }, [stopLoop]);
+    // Once the finger is up, stop when the spring settles; committing a page
+    // is the only hop back to JS, and it happens once per turn.
+    if (!grabbing.value) {
+      if (frame.progress >= 0.999) {
+        animating.value = false;
+        if (canAdvance) scheduleOnRN(commitTurn);
+      } else if (frame.progress <= 0.001) {
+        animating.value = false;
+      }
+    }
+  }, true);
 
+  // Gesture handlers are worklets: they drive the solver on the UI thread
+  // through its boxed handle, so a drag never touches the JS thread.
   const pan = Gesture.Pan()
     .onBegin((event) => {
-      const solver = solverRef.current;
-      if (!solver) return;
+      'worklet';
+      const boxed = boxedSolver.value;
+      if (boxed == null) return;
       // Nothing to turn to: refuse the grab rather than leave the leaf
       // stranded mid-curl when the commit is later declined.
-      if (pageIndex + step >= source.pageCount) return;
-      const p = canvasToSolver(event.x, event.y);
-      const grabbed = solver.beginGrab(p.x, p.y);
-      if (grabbed) {
-        grabbingRef.current = true;
-        startLoop();
+      if (!canAdvance) return;
+      const x = (event.x - leafTx) / scale;
+      const y = (event.y - ty) / scale;
+      if (boxed.unbox().beginGrab(x, y)) {
+        grabbing.value = true;
+        animating.value = true;
       }
     })
     .onUpdate((event) => {
-      const solver = solverRef.current;
-      if (!solver) return;
-      const p = canvasToSolver(event.x, event.y);
-      solver.updateGrab(p.x, p.y);
+      'worklet';
+      const boxed = boxedSolver.value;
+      if (boxed == null || !grabbing.value) return;
+      const x = (event.x - leafTx) / scale;
+      const y = (event.y - ty) / scale;
+      boxed.unbox().updateGrab(x, y);
     })
     .onEnd((event) => {
-      const solver = solverRef.current;
-      if (!solver) return;
-      grabbingRef.current = false;
-      solver.release(event.velocityX, event.velocityY);
+      'worklet';
+      const boxed = boxedSolver.value;
+      if (boxed == null || !grabbing.value) return;
+      grabbing.value = false;
+      boxed.unbox().release(event.velocityX, event.velocityY);
     });
-
-  const frontVertices = React.useMemo(() => {
-    return buildVertices(
-      frame,
-      topologyRef.current?.front ?? null,
-      box.width,
-      box.height,
-    );
-  }, [frame, box.width, box.height]);
-
-  const backVertices = React.useMemo(() => {
-    return buildVertices(
-      frame,
-      topologyRef.current?.back ?? null,
-      box.width,
-      box.height,
-    );
-  }, [frame, box.width, box.height]);
 
   return (
     <View style={{ width, height }} onLayout={(e) => (layoutRef.current = e.nativeEvent.layout)}>
@@ -419,7 +430,7 @@ export function PageCurlView({
               />
             )}
             {/* Back of the curling page (shows next page) */}
-            {backVertices.vertices.length > 0 && nextImage && (
+            {indices.back.length > 0 && nextImage && currentImage && (
               <Group>
                 <ImageShader
                   image={nextImage}
@@ -430,14 +441,14 @@ export function PageCurlView({
                 />
                 <Vertices
                   mode="triangles"
-                  vertices={backVertices.vertices}
-                  textures={backVertices.textures}
-                  indices={backVertices.indices}
+                  vertices={backVerts}
+                  textures={backTex}
+                  indices={indices.back}
                 />
               </Group>
             )}
             {/* Front of the curling page (shows current page) */}
-            {frontVertices.vertices.length > 0 && currentImage && (
+            {indices.front.length > 0 && currentImage && (
               <Group>
                 <ImageShader
                   image={currentImage}
@@ -448,9 +459,9 @@ export function PageCurlView({
                 />
                 <Vertices
                   mode="triangles"
-                  vertices={frontVertices.vertices}
-                  textures={frontVertices.textures}
-                  indices={frontVertices.indices}
+                  vertices={frontVerts}
+                  textures={frontTex}
+                  indices={indices.front}
                 />
               </Group>
             )}
