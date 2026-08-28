@@ -74,6 +74,7 @@ export default function App(): React.JSX.Element {
   const { source, error } = useLocalArchive();
   const pageIndex = useReaderStore((s) => s.pageIndex);
   const setPageIndex = useReaderStore((s) => s.setPageIndex);
+  const turnRequest = useReaderStore((s) => s.turnRequest);
 
   return (
     <GestureHandlerRootView style={styles.root}>
@@ -102,6 +103,7 @@ export default function App(): React.JSX.Element {
             // Surface Duo fold — the seam becomes the book's gutter.
             gutter={0}
             onLayoutChange={useReaderStore.getState().setLayout}
+            turnRequest={turnRequest}
           />
         )}
         {source && <ReaderChrome />}

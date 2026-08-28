@@ -17,6 +17,8 @@ interface ReaderState {
   /** Mirrors how the reader is paging, so controls move exactly as a flip does. */
   step: number;
   spread: boolean;
+  /** Bumped to ask the reader to animate a turn; id changes every request. */
+  turnRequest: { dir: number; id: number };
 
   setSource: (source: ComicArchiveSource) => void;
   setError: (error: string) => void;
@@ -24,6 +26,7 @@ interface ReaderState {
   setPageIndex: (pageIndex: number) => void;
   toggleChrome: () => void;
   setLayout: (info: { step: number; spread: boolean }) => void;
+  requestTurn: (dir: number) => void;
 }
 
 export const useReaderStore = create<ReaderState>()((set) => ({
@@ -34,6 +37,7 @@ export const useReaderStore = create<ReaderState>()((set) => ({
   chromeVisible: true,
   step: 1,
   spread: false,
+  turnRequest: { dir: 1, id: 0 },
 
   setSource: (source) => set({ source }),
   setError: (error) => set({ error }),
@@ -41,4 +45,6 @@ export const useReaderStore = create<ReaderState>()((set) => ({
   setPageIndex: (pageIndex) => set({ pageIndex }),
   toggleChrome: () => set((s) => ({ chromeVisible: !s.chromeVisible })),
   setLayout: ({ step, spread }) => set({ step, spread }),
+  requestTurn: (dir) =>
+    set((s) => ({ turnRequest: { dir, id: s.turnRequest.id + 1 } })),
 }));

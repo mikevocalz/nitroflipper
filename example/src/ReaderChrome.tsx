@@ -11,7 +11,7 @@ import { useReaderStore } from './readerStore';
 export function ReaderChrome() {
   const source = useReaderStore((s) => s.source);
   const pageIndex = useReaderStore((s) => s.pageIndex);
-  const setPageIndex = useReaderStore((s) => s.setPageIndex);
+  const requestTurn = useReaderStore((s) => s.requestTurn);
   const visible = useReaderStore((s) => s.chromeVisible);
   const toggleChrome = useReaderStore((s) => s.toggleChrome);
   const step = useReaderStore((s) => s.step);
@@ -31,10 +31,9 @@ export function ReaderChrome() {
   const canBack = pageIndex - step >= 0;
   const canNext = pageIndex + step < count;
 
-  const go = (delta: number) => {
-    const next = pageIndex + delta;
-    if (next >= 0 && next < count) setPageIndex(next);
-  };
+  // Ask the reader to turn rather than jumping the index, so the button
+  // animates the same curl a swipe does.
+  const go = (dir: number) => requestTurn(dir);
 
   if (!visible) {
     return (
@@ -51,7 +50,7 @@ export function ReaderChrome() {
     <View style={styles.bar} pointerEvents="box-none">
       <View style={styles.pill}>
         <Pressable
-          onPress={() => go(-step)}
+          onPress={() => go(-1)}
           disabled={!canBack}
           style={styles.tap}
           accessibilityRole="button"
@@ -65,7 +64,7 @@ export function ReaderChrome() {
         </Pressable>
 
         <Pressable
-          onPress={() => go(step)}
+          onPress={() => go(1)}
           disabled={!canNext}
           style={styles.tap}
           accessibilityRole="button"

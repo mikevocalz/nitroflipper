@@ -45,6 +45,11 @@ interface PageCurlViewProps {
    * from here rather than assuming it.
    */
   onLayoutChange?: (info: { step: number; spread: boolean }) => void;
+  /**
+   * Turn the page as if flicked. `id` must change per request so repeated
+   * turns in the same direction each animate.
+   */
+  turnRequest?: { dir: number; id: number };
 }
 
 function makeImageFromBytes(bytes: ArrayBuffer) {
@@ -66,6 +71,7 @@ export function PageCurlView({
   spread: spreadProp,
   gutter = 0,
   onLayoutChange,
+  turnRequest,
 }: PageCurlViewProps) {
   // The whole animation is one scalar on the UI thread. The curl itself is
   // evaluated per pixel by the shader, so a frame costs no JS at all.
@@ -119,6 +125,24 @@ export function PageCurlView({
       : (width - leafFit.w) / 2;
   const leafTy = (height - leafFit.h) / 2;
   const leftTy = (height - leftFit.h) / 2;
+
+  // A page control turns the page through the same curl a flick does, so the
+  // two read as one interaction — and the animation covers any decode.
+  const requestId = turnRequest?.id ?? 0;
+  const requestDir = turnRequest?.dir ?? 1;
+  useEffect(() => {
+    if (requestId === 0 || turning.value) return;
+    const forward = requestDir > 0;
+    if (forward ? !canAdvance : !canGoBack) return;
+    dir.value = forward ? 1 : -1;
+    progress.value = 0;
+    turning.value = true;
+    progress.value = withTiming(1, { duration: 320 }, (finished) => {
+      'worklet';
+      if (finished) scheduleOnRN(commitDirection, forward);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [requestId]);
 
   useEffect(() => {
     onLayoutChange?.({ step, spread });
