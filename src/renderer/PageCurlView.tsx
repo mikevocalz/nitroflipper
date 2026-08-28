@@ -168,6 +168,19 @@ export function PageCurlView({
       if (cancelled) return;
       const fromRight = await read(leafIndex);
       if (cancelled) return;
+      // Publish the moment the two visible pages are in. Waiting for the
+      // destination and previous pairs too makes a button press sit dead for
+      // as long as a decode, even though what you are about to look at is
+      // already in hand.
+      setPages({
+        fromLeft,
+        fromRight,
+        toLeft: null,
+        toRight: null,
+        prevLeft: null,
+        prevRight: null,
+      });
+
       const toLeft = spread ? await read(pageIndex + step) : null;
       if (cancelled) return;
       const toRight = await read(leafIndex + step);

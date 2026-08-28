@@ -53,7 +53,7 @@ export function ReaderChrome() {
         <Pressable
           onPress={() => go(-step)}
           disabled={!canBack}
-          hitSlop={12}
+          style={styles.tap}
           accessibilityRole="button"
           accessibilityLabel="Previous page"
         >
@@ -67,7 +67,7 @@ export function ReaderChrome() {
         <Pressable
           onPress={() => go(step)}
           disabled={!canNext}
-          hitSlop={12}
+          style={styles.tap}
           accessibilityRole="button"
           accessibilityLabel="Next page"
         >
@@ -90,9 +90,9 @@ const styles = StyleSheet.create({
   pill: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 20,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
     borderRadius: 999,
     backgroundColor: 'rgba(20,20,20,0.82)',
   },
@@ -100,6 +100,14 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 15,
     fontVariant: ['tabular-nums'],
+  },
+  // 44dp is the smallest target Apple's HIG and WCAG 2.5.5 accept. The glyph
+  // is a fraction of that, so the target is the container, not the text.
+  tap: {
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   arrow: {
     color: '#fff',
