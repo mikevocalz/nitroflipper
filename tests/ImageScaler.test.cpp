@@ -66,3 +66,14 @@ TEST_CASE("Garbage input is rejected", "[ImageScaler]") {
   CHECK_FALSE(scaleEncodedImage(junk, 100, 100).has_value());
   CHECK_FALSE(scaleEncodedImage({}, 100, 100).has_value());
 }
+
+TEST_CASE("Formats stb cannot decode fail softly", "[ImageScaler]") {
+  // WebP (and AVIF) are not in stb's format list, but comic archives do carry
+  // them. The contract is that such a page reports failure rather than
+  // crashing or returning garbage, so the caller can hand the original bytes
+  // to the image pipeline — which decodes them fine, just without the
+  // downscale that keeps memory bounded.
+  const auto webp = readFixture(FIXTURE_DIR "/unsupported.webp");
+  REQUIRE_FALSE(webp.empty());
+  CHECK_FALSE(scaleEncodedImage(webp, 600, 900).has_value());
+}
