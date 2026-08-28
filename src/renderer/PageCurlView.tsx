@@ -38,6 +38,13 @@ interface PageCurlViewProps {
   spread?: boolean;
   /** Gap between display halves, for a dual-screen fold. */
   gutter?: number;
+  /**
+   * How the reader is currently paging: how many pages a turn moves, and
+   * whether two are shown. Pairing depends on the page sizes, so anything
+   * that also turns pages (a page control, a keyboard) must take the step
+   * from here rather than assuming it.
+   */
+  onLayoutChange?: (info: { step: number; spread: boolean }) => void;
 }
 
 function makeImageFromBytes(bytes: ArrayBuffer) {
@@ -58,6 +65,7 @@ export function PageCurlView({
   height,
   spread: spreadProp,
   gutter = 0,
+  onLayoutChange,
 }: PageCurlViewProps) {
   // The whole animation is one scalar on the UI thread. The curl itself is
   // evaluated per pixel by the shader, so a frame costs no JS at all.
@@ -109,6 +117,10 @@ export function PageCurlView({
       : (width - leafFit.w) / 2;
   const leafTy = (height - leafFit.h) / 2;
   const leftTy = (height - leftFit.h) / 2;
+
+  useEffect(() => {
+    onLayoutChange?.({ step, spread });
+  }, [onLayoutChange, step, spread]);
 
   const canAdvance = pageIndex + step < source.pageCount;
 

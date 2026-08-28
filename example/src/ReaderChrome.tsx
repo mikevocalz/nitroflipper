@@ -14,17 +14,20 @@ export function ReaderChrome() {
   const setPageIndex = useReaderStore((s) => s.setPageIndex);
   const visible = useReaderStore((s) => s.chromeVisible);
   const toggleChrome = useReaderStore((s) => s.toggleChrome);
+  const step = useReaderStore((s) => s.step);
+  const spread = useReaderStore((s) => s.spread);
 
   if (source == null) return null;
 
   const count = source.pageCount;
-  // The reader pairs pages, so the pill reports the spread, not one page.
-  const showsSpread = pageIndex + 1 < count;
-  const label = showsSpread
-    ? `${pageIndex + 1}–${pageIndex + 2} of ${count}`
-    : `${pageIndex + 1} of ${count}`;
+  // Step and pairing come from the reader itself. Recomputing them here drifts
+  // from the flip around wide pages, and the buttons then move by a different
+  // amount than a swipe does.
+  const label =
+    spread && pageIndex + 1 < count
+      ? `${pageIndex + 1}–${pageIndex + 2} of ${count}`
+      : `${pageIndex + 1} of ${count}`;
 
-  const step = showsSpread ? 2 : 1;
   const canBack = pageIndex - step >= 0;
   const canNext = pageIndex + step < count;
 

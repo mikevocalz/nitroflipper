@@ -101,6 +101,7 @@ export default function App(): React.JSX.Element {
             // No gutter: the pages meet at the spine, which lands on the
             // Surface Duo fold — the seam becomes the book's gutter.
             gutter={0}
+            onLayoutChange={useReaderStore.getState().setLayout}
           />
         )}
         {source && <ReaderChrome />}
