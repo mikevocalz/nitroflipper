@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect } from 'react';
 import {
   ActivityIndicator,
   Image,
@@ -19,10 +19,14 @@ import {
 } from 'nitro-flipper';
 
 import ltrAsset from './src/assets/MMPR1.cbz';
+import { useReaderStore } from './src/readerStore';
+import { ReaderChrome } from './src/ReaderChrome';
 
 function useLocalArchive() {
-  const [source, setSource] = useState<ComicArchiveSource | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const source = useReaderStore((s) => s.source);
+  const error = useReaderStore((s) => s.error);
+  const setSource = useReaderStore((s) => s.setSource);
+  const setError = useReaderStore((s) => s.setError);
 
   useEffect(() => {
     let mounted = true;
@@ -65,9 +69,11 @@ export default function App(): React.JSX.Element {
   const isDarkMode = useColorScheme() === 'dark';
   // Measure the container instead of the window: the reader fills whatever
   // box it is given, with no assumption about system bar insets.
-  const [size, setSize] = useState({ width: 0, height: 0 });
+  const size = useReaderStore((s) => s.size);
+  const setSize = useReaderStore((s) => s.setSize);
   const { source, error } = useLocalArchive();
-  const [pageIndex, setPageIndex] = useState(0);
+  const pageIndex = useReaderStore((s) => s.pageIndex);
+  const setPageIndex = useReaderStore((s) => s.setPageIndex);
 
   return (
     <GestureHandlerRootView style={styles.root}>
@@ -97,6 +103,7 @@ export default function App(): React.JSX.Element {
             gutter={0}
           />
         )}
+        {source && <ReaderChrome />}
       </View>
     </GestureHandlerRootView>
   );
