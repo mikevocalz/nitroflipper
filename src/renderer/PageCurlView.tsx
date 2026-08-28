@@ -112,10 +112,6 @@ export function PageCurlView({
 
   const canAdvance = pageIndex + step < source.pageCount;
 
-  const commitTurn = useCallback(() => {
-    onPageIndexChange?.(pageIndex + step);
-  }, [onPageIndexChange, pageIndex, step]);
-
   // A new spread starts flat.
   useEffect(() => {
     progress.value = 0;
@@ -183,9 +179,14 @@ export function PageCurlView({
   // Drag maps travel across the leaf to curl progress; release either falls
   // open or springs back. All of it stays on the UI thread.
   const canGoBack = pageIndex - step >= 0;
-  const goBack = useCallback(() => {
-    onPageIndexChange?.(pageIndex - step);
-  }, [onPageIndexChange, pageIndex, step]);
+  // One callback the worklet can capture. Passing a *conditional* function
+  // reference to scheduleOnRN leaves the gesture silently inert.
+  const commitDirection = useCallback(
+    (forward: boolean) => {
+      onPageIndexChange?.(forward ? pageIndex + step : pageIndex - step);
+    },
+    [onPageIndexChange, pageIndex, step],
+  );
 
   // Books turn both ways: dragging in from the outer edge turns forward,
   // dragging out from the spine side pulls the previous leaf back.
@@ -229,7 +230,7 @@ export function PageCurlView({
       if (commit) {
         progress.value = withTiming(1, { duration: 280 }, (finished) => {
           'worklet';
-          if (finished) scheduleOnRN(forward ? commitTurn : goBack);
+          if (finished) scheduleOnRN(commitDirection, forward);
         });
       } else {
         progress.value = withSpring(0, { damping: 20, stiffness: 180 });
