@@ -151,14 +151,20 @@ export function PageCurlView({
       const toRight = await read(leafIndex + step);
       if (cancelled) return;
 
-      // Keep only the spread in hand and its neighbours either side.
-      const lo = pageIndex - step;
-      const hi = leafIndex + step;
-      for (const key of Array.from(cache.keys())) {
-        if (key < lo || key > hi) cache.delete(key);
+      // Hold only the four half-pages in use and free the rest. Evicting
+      // from the map is not enough: without dispose() the native bitmap
+      // stays alive, and a comic page is ~24MB, so paging through the book
+      // starves the decoder and pages come back null (grey).
+      const keep = new Set([pageIndex, leafIndex, pageIndex + step, leafIndex + step]);
+      for (const [key, img] of Array.from(cache.entries())) {
+        if (!keep.has(key)) {
+          cache.delete(key);
+          img.dispose();
+        }
       }
 
       setPages({ fromLeft, fromRight, toLeft, toRight });
+      turning.value = false;
       // Only now is it safe to lay the sheet flat: the page under the curl
       // is already the page we are about to show, so there is no jump.
       progress.value = 0;
@@ -185,6 +191,9 @@ export function PageCurlView({
 
   // -1 while turning back, so the same curl runs mirrored about the spine.
   const dir = useSharedValue(1);
+  // True from the moment a turn commits until its pages are on screen, so a
+  // second swipe cannot commit again and skip a spread.
+  const turning = useSharedValue(false);
 
   const uniforms = useDerivedValue(() => ({
     progress: progress.value,
@@ -200,9 +209,15 @@ export function PageCurlView({
   // reference to scheduleOnRN leaves the gesture silently inert.
   const commitDirection = useCallback(
     (forward: boolean) => {
-      onPageIndexChange?.(forward ? pageIndex + step : pageIndex - step);
+      const next = forward ? pageIndex + step : pageIndex - step;
+      if (next === pageIndex || next < 0 || next >= source.pageCount) {
+        // Nothing will load, so release the guard here or the reader locks.
+        turning.value = false;
+        return;
+      }
+      onPageIndexChange?.(next);
     },
-    [onPageIndexChange, pageIndex, step],
+    [onPageIndexChange, pageIndex, step, source.pageCount, turning],
   );
 
   // Books turn both ways: dragging in from the outer edge turns forward,
@@ -210,6 +225,7 @@ export function PageCurlView({
   const pan = Gesture.Pan()
     .onBegin((event) => {
       'worklet';
+      if (turning.value) return;
       const forward = rtl
         ? event.x < sheetX + sheetW / 2
         : event.x > sheetX + sheetW / 2;
@@ -218,6 +234,7 @@ export function PageCurlView({
     })
     .onUpdate((event) => {
       'worklet';
+      if (turning.value) return;
       const forward = dir.value > 0;
       if (forward ? !canAdvance : !canGoBack) return;
       // Forward drags travel toward the spine, back drags away from it.
@@ -232,6 +249,7 @@ export function PageCurlView({
     })
     .onEnd((event) => {
       'worklet';
+      if (turning.value) return;
       const forward = dir.value > 0;
       if (forward ? !canAdvance : !canGoBack) return;
       const away = forward
@@ -245,6 +263,7 @@ export function PageCurlView({
       const commit = flicked ? away > 0 : progress.value > COMMIT_AT;
 
       if (commit) {
+        turning.value = true;
         progress.value = withTiming(1, { duration: 280 }, (finished) => {
           'worklet';
           if (finished) scheduleOnRN(commitDirection, forward);
