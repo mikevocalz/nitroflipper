@@ -2,11 +2,11 @@ import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Image,
-  SafeAreaView,
   StatusBar,
   StyleSheet,
   Text,
   useColorScheme,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -63,12 +63,18 @@ function useLocalArchive() {
 
 export default function App(): React.JSX.Element {
   const isDarkMode = useColorScheme() === 'dark';
+  // Measure the container instead of the window: the reader fills whatever
+  // box it is given, with no assumption about system bar insets.
+  const [size, setSize] = useState({ width: 0, height: 0 });
   const { source, error } = useLocalArchive();
   const [pageIndex, setPageIndex] = useState(0);
 
   return (
     <GestureHandlerRootView style={styles.root}>
-      <SafeAreaView style={styles.container}>
+      <View
+        style={styles.container}
+        onLayout={(e) => setSize(e.nativeEvent.layout)}
+      >
         <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
         {error ? (
           <View style={styles.centered}>
@@ -84,11 +90,14 @@ export default function App(): React.JSX.Element {
             source={source}
             pageIndex={pageIndex}
             onPageIndexChange={setPageIndex}
-            width={400}
-            height={600}
+            width={size.width}
+            height={size.height}
+            // No gutter: the pages meet at the spine, which lands on the
+            // Surface Duo fold — the seam becomes the book's gutter.
+            gutter={0}
           />
         )}
-      </SafeAreaView>
+      </View>
     </GestureHandlerRootView>
   );
 }
