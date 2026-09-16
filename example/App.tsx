@@ -14,13 +14,48 @@ import RNBlobUtil from 'react-native-blob-util';
 
 import {
   createComicArchiveSource,
+  MuPDFSource,
   PageCurlView,
-  type ComicArchiveSource,
+  type PageSource,
 } from 'nitro-flipper';
 
 import ltrAsset from './src/assets/MMPR1.cbz';
+import pdfAsset from './src/assets/comic.pdf';
+import epubAsset from './src/assets/comic.epub';
 import { useReaderStore } from './src/readerStore';
 import { ReaderChrome } from './src/ReaderChrome';
+
+/**
+ * Which fixture the reader opens.
+ *
+ * A switch rather than a picker: this example exists to prove the engine
+ * works on a device, and a picker would be UI to debug before the thing it
+ * is meant to be testing.
+ */
+const FORMAT: 'cbz' | 'pdf' | 'epub' = 'pdf';
+
+const FIXTURES = {
+  cbz: { asset: ltrAsset, name: 'sample.cbz' },
+  pdf: { asset: pdfAsset, name: 'sample.pdf' },
+  epub: { asset: epubAsset, name: 'sample.epub' },
+} as const;
+
+/** Copy a bundled asset to a real path, since the engines open files. */
+async function materialise(asset: number, name: string): Promise<string> {
+  const resolved = Image.resolveAssetSource(asset);
+  const cachePath = `${RNBlobUtil.fs.dirs.CacheDir}/${name}`;
+  const res = await RNBlobUtil.config({ fileCache: true }).fetch(
+    'GET',
+    resolved.uri,
+  );
+  const downloaded = res.path();
+  if (!downloaded) {
+    throw new Error(`Failed to download ${name}`);
+  }
+  await RNBlobUtil.fs.cp(downloaded, cachePath);
+  await RNBlobUtil.fs.unlink(downloaded);
+  return cachePath;
+}
 
 function useLocalArchive() {
   const source = useReaderStore((s) => s.source);
@@ -33,21 +68,21 @@ function useLocalArchive() {
 
     (async () => {
       try {
-        const asset = Image.resolveAssetSource(ltrAsset);
-        const cachePath = `${RNBlobUtil.fs.dirs.CacheDir}/sample.cbz`;
-        const res = await RNBlobUtil.config({ fileCache: true }).fetch(
-          'GET',
-          asset.uri,
-        );
-        const downloaded = res.path();
-        if (!downloaded) {
-          throw new Error('Failed to download CBZ asset');
-        }
-        await RNBlobUtil.fs.cp(downloaded, cachePath);
-        await RNBlobUtil.fs.unlink(downloaded);
+        const fixture = FIXTURES[FORMAT];
+        const path = await materialise(fixture.asset, fixture.name);
 
-        const src = createComicArchiveSource();
-        await src.open(cachePath);
+        let src: PageSource;
+        if (FORMAT === 'cbz') {
+          const archive = createComicArchiveSource();
+          await archive.open(path);
+          src = archive;
+        } else {
+          // A single leaf's width, not the whole spread: passing the spread
+          // width makes every line run across both pages.
+          src = await MuPDFSource.open(path, {
+            layout: { width: 360, height: 640, fontSizePt: 12 },
+          });
+        }
 
         if (!mounted) return;
         setSource(src);
@@ -90,7 +125,7 @@ export default function App(): React.JSX.Element {
         ) : !source ? (
           <View style={styles.centered}>
             <ActivityIndicator size="large" />
-            <Text style={styles.label}>Loading comic…</Text>
+            <Text style={styles.label}>Loading {FORMAT.toUpperCase()}…</Text>
           </View>
         ) : (
           <PageCurlView

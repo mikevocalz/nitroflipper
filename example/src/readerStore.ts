@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-import type { ComicArchiveSource } from 'nitro-flipper';
+import type { PageSource } from 'nitro-flipper';
 
 interface Size {
   width: number;
@@ -8,7 +8,7 @@ interface Size {
 }
 
 interface ReaderState {
-  source: ComicArchiveSource | null;
+  source: PageSource | null;
   error: string | null;
   size: Size;
   pageIndex: number;
@@ -20,7 +20,7 @@ interface ReaderState {
   /** Bumped to ask the reader to animate a turn; id changes every request. */
   turnRequest: { dir: number; id: number };
 
-  setSource: (source: ComicArchiveSource) => void;
+  setSource: (source: PageSource) => void;
   setError: (error: string) => void;
   setSize: (size: Size) => void;
   setPageIndex: (pageIndex: number) => void;
