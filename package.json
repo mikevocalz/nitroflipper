@@ -14,15 +14,19 @@
     "ios",
     "android",
     "lib",
-    "react-native.config.js"
+    "react-native.config.js",
+    "nitrogen/generated",
+    "third_party",
+    "*.podspec"
   ],
   "scripts": {
     "build": "tsc --noEmit false --declaration true --outDir lib",
     "typecheck": "tsc --noEmit",
     "test": "npm run typecheck && npm run test:cpp && npm run test:ts",
-    "test:cpp": "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target pagecurlsolver_test --target comicarchive_test && ./build/pagecurlsolver_test && ./build/comicarchive_test",
+    "test:cpp": "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target pagecurlsolver_test comicarchive_test imagescaler_test && ./build/pagecurlsolver_test && ./build/comicarchive_test && ./build/imagescaler_test",
     "test:ts": "node --test --import=tsx 'src/**/*.test.ts'",
-    "nitrogen": "npx nitrogen"
+    "nitrogen": "npx nitrogen",
+    "test:mupdf": "cmake -S . -B build-mupdf -DCMAKE_BUILD_TYPE=Release -DNITROFLIPPER_WITH_MUPDF=ON && cmake --build build-mupdf --target mupdfdocument_test && ./build-mupdf/mupdfdocument_test"
   },
   "keywords": [
     "react-native",
