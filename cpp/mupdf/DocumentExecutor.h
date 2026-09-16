@@ -104,7 +104,12 @@ class DocumentExecutor : public std::enable_shared_from_this<DocumentExecutor> {
 
   using Job = std::function<void()>;
 
-  std::unique_ptr<MuPDFDocument> document_;
+  // shared_ptr, not unique_ptr: a job keeps the DOCUMENT alive for its own
+  // duration without keeping the EXECUTOR alive. If a job held the last
+  // reference to the executor, destroying that job on the worker would run
+  // ~DocumentExecutor on the worker, and shutdown() would join its own thread
+  // -- "Resource deadlock avoided", thrown out of a noexcept function.
+  std::shared_ptr<MuPDFDocument> document_;
   std::thread worker_;
 
   mutable std::mutex mutex_;
@@ -127,26 +132,30 @@ std::future<R> DocumentExecutor::submit(std::function<R(MuPDFDocument&)> work) {
   auto promise = std::make_shared<std::promise<R>>();
   std::future<R> future = promise->get_future();
 
-  // The job holds the executor alive for its own duration, so a JS-side release
-  // during a render cannot destroy the document underneath it.
-  auto self = shared_from_this();
-  Job job = [self, promise, work = std::move(work)]() mutable {
+  // The job holds the DOCUMENT alive for its own duration, so a JS-side release
+  // during a render cannot destroy it underneath the work. It holds only a
+  // weak reference to the executor, so the worker can never be the thread that
+  // destroys the executor.
+  auto document = document_;
+  std::weak_ptr<DocumentExecutor> weak = weak_from_this();
+  Job job = [weak, document, promise, work = std::move(work)]() mutable {
+    auto self = weak.lock();
     // Checked inside the job, not only at submit time: shutdown can arrive
     // after this job was queued but before it runs. Without this an abandoned
     // job would call into a document that close() has already released.
-    if (self->cancelled_.load(std::memory_order_acquire)) {
+    if (!self || self->cancelled_.load(std::memory_order_acquire)) {
       promise->set_exception(std::make_exception_ptr(
           Error(ErrorKind::Cancelled, "document closed before this job ran")));
       return;
     }
     try {
       if constexpr (std::is_void_v<R>) {
-        work(*self->document_);
-        self->publish(self->document_->snapshot());
+        work(*document);
+        self->publish(document->snapshot());
         promise->set_value();
       } else {
-        R result = work(*self->document_);
-        self->publish(self->document_->snapshot());
+        R result = work(*document);
+        self->publish(document->snapshot());
         promise->set_value(std::move(result));
       }
     } catch (...) {

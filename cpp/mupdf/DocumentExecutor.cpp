@@ -13,7 +13,7 @@ std::shared_ptr<DocumentExecutor> DocumentExecutor::make(std::size_t storeBudget
 void DocumentExecutor::start(std::size_t storeBudgetBytes) {
   // Constructed on the caller's thread but only ever *used* on the worker.
   // fz_new_context has no thread affinity; fz_document does.
-  document_ = std::make_unique<MuPDFDocument>(storeBudgetBytes);
+  document_ = std::make_shared<MuPDFDocument>(storeBudgetBytes);
   worker_ = std::thread([this] { run(); });
 }
 
@@ -48,12 +48,21 @@ void DocumentExecutor::run() {
 
 void DocumentExecutor::enqueue(std::function<void(MuPDFDocument*)> job,
                                std::function<void()> afterPublish) {
-  auto self = shared_from_this();
+  // weak, not shared: see the note on document_. A strong reference here makes
+  // the worker capable of destroying the executor, which self-joins.
+  std::weak_ptr<DocumentExecutor> weak = weak_from_this();
+  auto document = document_;
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!stopping_) {
-      queue_.push_back([self, job, afterPublish]() {
+      queue_.push_back([weak, document, job, afterPublish]() {
+        auto self = weak.lock();
+        if (!self) {
+          job(nullptr);
+          if (afterPublish) afterPublish();
+          return;
+        }
         // nullptr tells the job the document is gone. Re-checked here rather
         // than only at enqueue time, because shutdown can land in between.
         if (self->cancelled_.load(std::memory_order_acquire)) {
@@ -61,10 +70,10 @@ void DocumentExecutor::enqueue(std::function<void(MuPDFDocument*)> job,
           if (afterPublish) afterPublish();
           return;
         }
-        job(self->document_.get());
+        job(document.get());
         // Publish before the continuation runs, so anything the JS side reads
         // synchronously after its promise settles sees this job's state.
-        self->publish(self->document_->snapshot());
+        self->publish(document->snapshot());
         if (afterPublish) afterPublish();
       });
       cv_.notify_one();
