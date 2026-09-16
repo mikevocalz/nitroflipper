@@ -57,4 +57,10 @@ if(NITROFLIPPER_WITH_MUPDF)
   target_include_directories(NitroFlipper PRIVATE ../cpp/mupdf)
   target_link_libraries(NitroFlipper mupdf)
   target_compile_definitions(NitroFlipper PRIVATE NITROFLIPPER_WITH_MUPDF=1)
+
+  # MuPDF is a general-purpose library and a reader touches a fraction of it.
+  # AGP already compiles with -ffunction-sections -fdata-sections but never
+  # collects, so every unreferenced filter, writer and colourspace ships.
+  # Measured on arm64-v8a: 27.7MB -> see docs/mupdf-integration-status.md.
+  target_link_options(NitroFlipper PRIVATE -Wl,--gc-sections)
 endif()

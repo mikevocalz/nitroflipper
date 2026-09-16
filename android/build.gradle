@@ -23,6 +23,17 @@ android {
         arguments "-DANDROID_STL=c++_shared", "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
       }
     }
+
+    // Build the same ABIs the app does. Without this the library builds all
+    // four while react-native-nitro-modules only publishes the app's, so the
+    // extra ABIs link without libNitroModules.so and fail on every Nitro
+    // symbol -- an error that looks like a Nitro problem and is really an ABI
+    // mismatch. Also keeps MuPDF from being compiled for ABIs nobody ships.
+    ndk {
+      abiFilters(*(rootProject.hasProperty("reactNativeArchitectures")
+        ? rootProject.getProperty("reactNativeArchitectures").split(",")
+        : ["armeabi-v7a", "arm64-v8a", "x86", "x86_64"]))
+    }
   }
 
   externalNativeBuild {

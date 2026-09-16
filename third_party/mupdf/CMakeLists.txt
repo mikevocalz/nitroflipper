@@ -327,7 +327,11 @@ target_compile_definitions(mupdf PUBLIC ${MUPDF_FEATURE_DEFS} ${MUPDF_FONT_DEFS}
 
 find_package(Threads REQUIRED)
 target_link_libraries(mupdf PUBLIC Threads::Threads)
-if(NOT ANDROID AND NOT APPLE)
+if(ANDROID)
+  # fitz routes warnings and errors through __android_log_print on Android,
+  # which lives in liblog and is not linked by default.
+  target_link_libraries(mupdf PUBLIC log)
+elseif(NOT APPLE)
   target_link_libraries(mupdf PUBLIC m)
 endif()
 
