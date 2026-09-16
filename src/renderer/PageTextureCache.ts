@@ -124,12 +124,14 @@ export class PageTextureCache {
 
   /** Look up without retaining. Refreshes recency. */
   peek(key: PageKey): SkImage | null {
-    const entry = this.entries.get(pageKeyOf(key));
+    const id = pageKeyOf(key);
+    // `held` is part of the lookup: an evicted-but-retained image is still
+    // alive and still correct, so re-reading it is a hit, not a decode.
+    const entry = this.entries.get(id) ?? this.held.get(id);
     if (entry === undefined) {
       return null;
     }
-    this.clock += 1;
-    entry.lastUsed = this.clock;
+    this.revive(id, entry);
     return entry.image;
   }
 
@@ -142,11 +144,17 @@ export class PageTextureCache {
    */
   set(key: PageKey, image: SkImage, bytes: number): SkImage {
     const id = pageKeyOf(key);
-    const existing = this.entries.get(id);
+    // One entry per id, ALWAYS -- including ids that only survive in `held`.
+    // A second entry under a live id makes release() land on the wrong one:
+    // the previous frame's release decrements the current frame's count, it
+    // reaches zero, and the image the shader is sampling is disposed. That is
+    // a blank page while paging back and forth over the same spread.
+    const existing = this.entries.get(id) ?? this.held.get(id);
     if (existing !== undefined) {
       if (existing.image !== image) {
         image.dispose();
       }
+      this.revive(id, existing);
       return existing.image;
     }
 
@@ -239,6 +247,24 @@ export class PageTextureCache {
       }
       this.remove(id, entry);
     }
+  }
+
+  /**
+   * Put an evicted-but-retained entry back in the map, charged for again.
+   *
+   * Recency is bumped first so the eviction pass that follows cannot pick the
+   * entry that was just asked for.
+   */
+  private revive(id: string, entry: Entry): void {
+    this.clock += 1;
+    entry.lastUsed = this.clock;
+    if (!entry.evicted) {
+      return;
+    }
+    entry.evicted = false;
+    this.entries.set(id, entry);
+    this.bytesUsed += entry.bytes;
+    this.evictToBudget();
   }
 
   private remove(id: string, entry: Entry): void {

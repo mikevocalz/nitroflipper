@@ -215,6 +215,36 @@ describe('duplicate insertion', () => {
   });
 });
 
+describe('paging back and forth over an evicted page', () => {
+  it('reuses the retained image instead of aliasing a second entry', () => {
+    // Budget holds two pages, so page 0 is evicted while frame A still draws
+    // it -- the shape of a back-and-forth turn over a spread.
+    const cache = new PageTextureCache({ budgetBytes: 200 });
+    const zero = fakeImage();
+    cache.set(key({ pageIndex: 0 }), zero, 100);
+    cache.retain(key({ pageIndex: 0 }));
+    cache.set(key({ pageIndex: 1 }), fakeImage(), 100);
+    cache.set(key({ pageIndex: 2 }), fakeImage(), 100);
+    assert.equal(cache.has(key({ pageIndex: 0 })), false, 'evicted from the map');
+    assert.equal(zero.disposed, false, 'retained, so still alive');
+
+    // Turning back asks for page 0 again. It must come back as the SAME
+    // entry: a second entry under the same id makes the next release land on
+    // the wrong one and dispose an image the frame is still sampling.
+    assert.equal(cache.peek(key({ pageIndex: 0 })), zero, 'retained page is a hit');
+    const loser = fakeImage();
+    assert.equal(cache.set(key({ pageIndex: 0 }), loser, 100), zero);
+    assert.equal(loser.disposed, true, 'the redundant decode must not leak');
+
+    cache.retain(key({ pageIndex: 0 })); // frame B
+    cache.release(key({ pageIndex: 0 })); // frame A lets go
+    assert.equal(zero.disposed, false, 'frame B still holds it');
+
+    cache.release(key({ pageIndex: 0 }));
+    assert.equal(zero.disposed, false, 'back in the map, not evicted');
+  });
+});
+
 describe('textureBytes', () => {
   it('counts RGBA', () => {
     assert.equal(textureBytes(10, 10), 400);
