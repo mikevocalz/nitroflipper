@@ -24,6 +24,10 @@ import pdfAsset from './src/assets/comic.pdf';
 import epubAsset from './src/assets/comic.epub';
 import { useReaderStore } from './src/readerStore';
 import { ReaderChrome } from './src/ReaderChrome';
+import { ContentsPanel } from './src/panels/ContentsPanel';
+import { SearchPanel } from './src/panels/SearchPanel';
+import { BookmarksPanel } from './src/panels/BookmarksPanel';
+import { AppearancePanel } from './src/panels/AppearancePanel';
 
 /**
  * Which fixture the reader opens.
@@ -32,7 +36,7 @@ import { ReaderChrome } from './src/ReaderChrome';
  * works on a device, and a picker would be UI to debug before the thing it
  * is meant to be testing.
  */
-const FORMAT: 'cbz' | 'pdf' | 'epub' = 'epub';
+const FORMAT: 'cbz' | 'pdf' | 'epub' = 'cbz';
 
 const FIXTURES = {
   cbz: { asset: ltrAsset, name: 'sample.cbz' },
@@ -100,6 +104,23 @@ function useLocalArchive() {
   return { source, error };
 }
 
+/** Only one panel is ever over the reader, so a switch is the whole router. */
+function ActivePanel() {
+  const panel = useReaderStore((s) => s.panel);
+  switch (panel) {
+    case 'toc':
+      return <ContentsPanel />;
+    case 'search':
+      return <SearchPanel />;
+    case 'bookmarks':
+      return <BookmarksPanel />;
+    case 'appearance':
+      return <AppearancePanel />;
+    default:
+      return null;
+  }
+}
+
 export default function App(): React.JSX.Element {
   const isDarkMode = useColorScheme() === 'dark';
   // Measure the container instead of the window: the reader fills whatever
@@ -145,6 +166,7 @@ export default function App(): React.JSX.Element {
           />
         )}
         {source && <ReaderChrome />}
+        {source && <ActivePanel />}
       </View>
     </GestureHandlerRootView>
   );

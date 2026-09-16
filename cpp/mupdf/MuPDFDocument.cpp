@@ -341,8 +341,23 @@ std::vector<OutlineItem> MuPDFDocument::outline() const {
       item.title = node->title != nullptr ? node->title : "";
       item.uri = node->uri != nullptr ? node->uri : "";
       item.depth = frame.depth;
+
       if (node->page.chapter >= 0 && node->page.page >= 0) {
         item.location = Location{node->page.chapter, node->page.page};
+      } else if (node->uri != nullptr && node->uri[0] != '\0') {
+        // EPUB outline entries carry a URI into the spine and leave `page`
+        // unset, so trusting `page` alone reports every chapter of an EPUB as
+        // unresolvable. fz_resolve_link turns the URI into a real location.
+        // An external link (http:) resolves to a negative chapter, which stays
+        // unresolved -- correctly, since it is not a place in this document.
+        const char* uri = node->uri;
+        fz_location resolved{-1, -1};
+        if (fzTry(ctx, [&] {
+              resolved = fz_resolve_link(ctx, doc, uri, nullptr, nullptr);
+            }) &&
+            resolved.chapter >= 0 && resolved.page >= 0) {
+          item.location = Location{resolved.chapter, resolved.page};
+        }
       }
       items.push_back(std::move(item));
       if (node->down != nullptr) {
