@@ -34,7 +34,11 @@ Measured, on this machine:
 - Android arm64 shared library, `--gc-sections`, stripped: **15.1 MB per ABI**
 - All four `LOAD` segments aligned `0x4000` — **16 KB page-size compatible**
 - Engine cross-compile: 41.7 s (Android), 44.6 s (iOS device), 45.1 s (iOS sim)
-- Embedded fonts default `no-cjk`: 179 files, drops 147 MB of CJK source
+- Embedded fonts default `no-cjk`: urw + sil + noto, dropping the 147 MB of
+  CJK source. Note the release tarball pre-generates **only** the urw base-14
+  fonts; every other family ships as raw .cff/.otf/.ttf and is turned into C
+  arrays by `scripts/hexdump.sh` at configure time, the way upstream's
+  Makefile does it during a build.
 
 ## Implemented, not yet proven
 

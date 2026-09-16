@@ -198,36 +198,92 @@ set(NITROFLIPPER_MUPDF_FONTS "no-cjk" CACHE STRING
 set_property(CACHE NITROFLIPPER_MUPDF_FONTS PROPERTY STRINGS full no-cjk minimal)
 
 set(MUPDF_FONT_DIR "${MUPDF_DIR}/generated/resources/fonts")
-file(GLOB MUPDF_FONT_URW CONFIGURE_DEPENDS "${MUPDF_FONT_DIR}/urw/*.c")
-file(GLOB MUPDF_FONT_SIL CONFIGURE_DEPENDS "${MUPDF_FONT_DIR}/sil/*.c")
-file(GLOB MUPDF_FONT_NOTO CONFIGURE_DEPENDS "${MUPDF_FONT_DIR}/noto/*.c")
-file(GLOB MUPDF_FONT_DROID CONFIGURE_DEPENDS "${MUPDF_FONT_DIR}/droid/*.c")
-file(GLOB MUPDF_FONT_HAN CONFIGURE_DEPENDS "${MUPDF_FONT_DIR}/han/*.c")
 
+# The release tarball pre-generates ONLY the urw base-14 fonts. Every other
+# family ships as the raw .cff/.otf/.ttf under resources/fonts, and upstream's
+# Makefile turns those into C arrays with scripts/hexdump.sh during the build.
+# We have no Makefile, so do the same here.
+#
+# Generated at configure time rather than through add_custom_command, because
+# the resulting .c files have to exist before they can be listed as sources.
+# Each file is skipped when it already exists, so this costs once per tree.
+function(mupdf_generate_fonts family extension out_var)
+  set(generated "")
+  file(GLOB binaries "${MUPDF_DIR}/resources/fonts/${family}/*.${extension}")
+  if(NOT binaries)
+    set(${out_var} "" PARENT_SCOPE)
+    return()
+  endif()
+  # Only generated/resources/fonts/urw exists in the tarball; every other
+  # family's directory has to be made before execute_process can redirect into
+  # it, or it fails with a bare "No such file or directory" that names the
+  # input rather than the missing output directory.
+  file(MAKE_DIRECTORY "${MUPDF_FONT_DIR}/${family}")
+  foreach(binary IN LISTS binaries)
+    get_filename_component(name "${binary}" NAME)
+    set(target "${MUPDF_FONT_DIR}/${family}/${name}.c")
+    if(NOT EXISTS "${target}")
+      execute_process(
+        COMMAND bash "${MUPDF_DIR}/scripts/hexdump.sh" "${binary}"
+        OUTPUT_FILE "${target}"
+        RESULT_VARIABLE status
+      )
+      if(NOT status EQUAL 0)
+        # Remove the partial file, or the next configure trusts it.
+        file(REMOVE "${target}")
+        message(FATAL_ERROR "hexdump.sh failed for ${binary} (status ${status})")
+      endif()
+    endif()
+    list(APPEND generated "${target}")
+  endforeach()
+  set(${out_var} "${generated}" PARENT_SCOPE)
+endfunction()
+
+file(GLOB MUPDF_FONT_URW CONFIGURE_DEPENDS "${MUPDF_FONT_DIR}/urw/*.c")
 if(NOT MUPDF_FONT_URW)
   message(FATAL_ERROR
-    "No embedded fonts under ${MUPDF_FONT_DIR}/urw. The *-source tarball ships "
-    "these pre-generated; a plain git checkout does not, and would need "
-    "scripts/hexdump.sh run first.")
+    "No embedded fonts under ${MUPDF_FONT_DIR}/urw. Those ship pre-generated "
+    "in the *-source tarball; this looks like a git checkout instead.")
 endif()
 
-set(MUPDF_FONT_SRC ${MUPDF_FONT_URW} ${MUPDF_FONT_SIL})
+# Generated on demand below, only for the families the selected set needs.
+set(MUPDF_FONT_SIL "")
+set(MUPDF_FONT_NOTO "")
+set(MUPDF_FONT_DROID "")
+set(MUPDF_FONT_HAN "")
+
 set(MUPDF_FONT_DEFS "")
 
-if(NITROFLIPPER_MUPDF_FONTS STREQUAL "full")
-  list(APPEND MUPDF_FONT_SRC ${MUPDF_FONT_NOTO} ${MUPDF_FONT_DROID} ${MUPDF_FONT_HAN})
+if(NITROFLIPPER_MUPDF_FONTS STREQUAL "minimal")
+  # urw only. TOFU_SIL and TOFU_NOTO must be set together with omitting the
+  # sources: noto.c has matching #if tests, and a mismatch is either a link
+  # error or a font compiled in that nothing can reach.
+  list(APPEND MUPDF_FONT_DEFS TOFU_CJK TOFU_NOTO TOFU_SIL)
 elseif(NITROFLIPPER_MUPDF_FONTS STREQUAL "no-cjk")
-  list(APPEND MUPDF_FONT_SRC ${MUPDF_FONT_NOTO})
+  mupdf_generate_fonts(sil cff MUPDF_FONT_SIL)
+  mupdf_generate_fonts(noto otf MUPDF_FONT_NOTO_OTF)
+  mupdf_generate_fonts(noto ttf MUPDF_FONT_NOTO_TTF)
+  set(MUPDF_FONT_NOTO ${MUPDF_FONT_NOTO_OTF} ${MUPDF_FONT_NOTO_TTF})
   # TOFU_CJK implies TOFU_CJK_EXT and TOFU_CJK_LANG, and drops both han and
-  # droid -- matching the two lists omitted above.
+  # droid -- matching the two families not generated.
   list(APPEND MUPDF_FONT_DEFS TOFU_CJK)
-elseif(NITROFLIPPER_MUPDF_FONTS STREQUAL "minimal")
-  list(APPEND MUPDF_FONT_DEFS TOFU_CJK TOFU_NOTO)
+elseif(NITROFLIPPER_MUPDF_FONTS STREQUAL "full")
+  mupdf_generate_fonts(sil cff MUPDF_FONT_SIL)
+  mupdf_generate_fonts(noto otf MUPDF_FONT_NOTO_OTF)
+  mupdf_generate_fonts(noto ttf MUPDF_FONT_NOTO_TTF)
+  set(MUPDF_FONT_NOTO ${MUPDF_FONT_NOTO_OTF} ${MUPDF_FONT_NOTO_TTF})
+  mupdf_generate_fonts(droid ttf MUPDF_FONT_DROID)
+  mupdf_generate_fonts(han ttc MUPDF_FONT_HAN)
 else()
   message(FATAL_ERROR
     "NITROFLIPPER_MUPDF_FONTS must be full, no-cjk or minimal "
     "(got '${NITROFLIPPER_MUPDF_FONTS}')")
 endif()
+
+set(MUPDF_FONT_SRC
+  ${MUPDF_FONT_URW} ${MUPDF_FONT_SIL} ${MUPDF_FONT_NOTO}
+  ${MUPDF_FONT_DROID} ${MUPDF_FONT_HAN}
+)
 
 list(LENGTH MUPDF_FONT_SRC MUPDF_FONT_COUNT)
 message(STATUS
