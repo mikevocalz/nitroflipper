@@ -29,6 +29,7 @@ import {
   textureBytes,
   type PageKey,
 } from './PageTextureCache';
+import { buildSpreadGroups, planSpreadAt } from './spreadPlan';
 
 interface PageCurlViewProps {
   source: PageSource;
@@ -78,12 +79,27 @@ interface PageCurlViewProps {
    */
   textureBudgetBytes?: number;
   /**
+   * Called when the pages on screen change, with the page indices now drawn.
+   *
+   * Not the same moment as `onPageIndexChange`, which fires the instant a turn
+   * commits. The canvas is a SurfaceView and composites independently of the
+   * React view hierarchy, so chrome driven by the requested index updates a
+   * frame before the page it is labelling -- the page counter ticks over while
+   * the old page is still on screen. Label the reader from this instead.
+   */
+  onSpreadVisible?: (pages: readonly number[]) => void;
+  /**
    * Called when a page fails to load.
    *
    * Without this a rejection inside the loader is an unhandled promise and the
    * reader just stays blank -- no page, no error, nothing to act on.
    */
   onPageLoadError?: (error: unknown) => void;
+}
+
+/** The pages a group covers, in reading order. */
+function pagesOfGroup(group: { start: number; size: number }): number[] {
+  return Array.from({ length: group.size }, (_, i) => group.start + i);
 }
 
 /** Generations to key the cache on, when the source publishes them. */
@@ -105,6 +121,20 @@ function makeImageFromBytes(bytes: ArrayBuffer) {
   return Skia.Image.MakeImageFromEncoded(data);
 }
 
+/** Resolve after `count` drawn frames, so a UI-thread write can follow a mount. */
+function nextFrames(count: number): Promise<void> {
+  return new Promise((resolve) => {
+    const step = (remaining: number) => {
+      if (remaining <= 0) {
+        resolve();
+        return;
+      }
+      requestAnimationFrame(() => step(remaining - 1));
+    };
+    step(count);
+  });
+}
+
 /** A flick this fast decides the turn regardless of how far it got. */
 const FLICK_VELOCITY = 400;
 /** Past this fraction of the page, a released drag falls open. */
@@ -123,6 +153,7 @@ export function PageCurlView({
   documentId = 'default',
   appearance = 'default',
   textureBudgetBytes,
+  onSpreadVisible,
   onPageLoadError,
 }: PageCurlViewProps) {
   // The whole animation is one scalar on the UI thread. The curl itself is
@@ -133,20 +164,33 @@ export function PageCurlView({
 
   const viewport = { width, height };
   const fitsTwoUp = (b: PageBox) => shouldUseSpread(viewport, b, 'auto');
-
-  const leftBox = source.getPageBox(pageIndex);
-  const nextBox =
-    pageIndex + 1 < source.pageCount ? source.getPageBox(pageIndex + 1) : null;
+  const generations = sourceGenerations(source);
 
   // Pair two pages only when both can sit two-up. A double-width page (a
   // drawn spread) is shown alone across the viewport instead of squeezed
   // into half of it.
-  const canSpread =
-    fitsTwoUp(leftBox) && nextBox !== null && fitsTwoUp(nextBox);
-  const spread = (spreadProp ?? true) && canSpread;
-  const step = spread ? 2 : 1;
-  const leafIndex = spread ? pageIndex + 1 : pageIndex;
-  const box = spread && nextBox ? nextBox : leftBox;
+  //
+  // Grouped for the whole book, not for the page you are on: after a page
+  // shown alone the pairing parity flips, so a back-turn that subtracts the
+  // current group's size lands between two groups and the way back stops
+  // matching the way out. See spreadPlan.ts.
+  const groups = useMemo(
+    () =>
+      buildSpreadGroups(
+        source.pageCount,
+        (index) => fitsTwoUp(source.getPageBox(index)),
+        spreadProp ?? true,
+      ),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [source, source.pageCount, width, height, gutter, spreadProp,
+     generations.document, generations.layout],
+  );
+  const plan = planSpreadAt(groups, pageIndex);
+  const spread = plan.spread;
+  const step = plan.step;
+  const leafIndex = plan.leafIndex;
+  const leftBox = source.getPageBox(plan.pages[0]);
+  const box = source.getPageBox(leafIndex);
 
   // A normal page shown alone still belongs in one display half — centering
   // it would straddle a fold. A true double-width page may span both.
@@ -200,7 +244,7 @@ export function PageCurlView({
     onLayoutChange?.({ step, spread });
   }, [onLayoutChange, step, spread]);
 
-  const canAdvance = pageIndex + step < source.pageCount;
+  const canAdvance = plan.next !== null;
 
   // Four half-pages: the spread you are on and the one you are turning to.
   // The turning sheet spans both halves so the curl crosses the spine.
@@ -222,23 +266,56 @@ export function PageCurlView({
   // once its replacement is up. Dispose-on-load is what could pull a texture
   // out from under the shader mid-curl.
   const retainedRef = useRef<PageKey[]>([]);
+  // Which way the reader is moving, so the warm-up follows them rather than
+  // always running forward. 1 on first open: a book opens going forward.
+  const travelRef = useRef(1);
 
   const scale = PixelRatio.get();
-  const texW = Math.ceil(leafFit.w * scale);
-  const texH = Math.ceil(leafFit.h * scale);
-  const generations = sourceGenerations(source);
+  /**
+   * The raster a page is decoded at, from that page's own slot.
+   *
+   * Not from the spread you happen to be on: a double-width page is shown
+   * alone across the whole viewport, so while one is on screen every
+   * neighbour was being decoded at full-viewport size -- 24MB a page instead
+   * of 8MB -- and then decoded all over again at half size on the next turn,
+   * because the raster is part of the cache key. Three of those pages sit
+   * together near the end of a typical comic, which is where the reader ran
+   * out of memory and drew nothing.
+   */
+  const rasterOf = (index: number) => {
+    const group = planSpreadAt(groups, index);
+    const slotWidth = group.spread ? (width - gutter) / 2 : width;
+    const b = source.getPageBox(index);
+    const s = Math.min(slotWidth / b.width, height / b.height);
+    return {
+      w: Math.ceil(b.width * s * scale),
+      h: Math.ceil(b.height * s * scale),
+    };
+  };
 
-  // A spread turn needs six pages resident -- the spread you are on, the one
-  // ahead and the one behind -- plus two prefetched. A budget smaller than
-  // that evicts a page the current frame is about to draw, then re-decodes it
-  // on the next swipe: the reader flickers and pages come back blank while
-  // paging back and forth. Ten pages leaves headroom over the eight in flight.
-  //
-  // The old fixed default was six 1080x1920 pages (47.5MB) while a spread on
-  // this device is six 1125x1800 pages (48.6MB) -- over budget on arrival.
-  const workingSet = spread ? 10 : 6;
+  // Budget the pages actually in flight, at the size each is actually decoded
+  // at: the spread you are on, the one ahead, the one behind, and the warm-up
+  // beyond. A budget below the working set evicts a page the current frame is
+  // about to draw and re-decodes it on the next swipe -- the reader flickers
+  // and pages come back blank while turning back and forth. Half again over
+  // the measured need is the headroom.
+  const inFlight = [
+    ...plan.pages,
+    ...(plan.next ? pagesOfGroup(plan.next) : []),
+    ...(plan.previous ? pagesOfGroup(plan.previous) : []),
+  ];
   const budgetBytes =
-    textureBudgetBytes ?? Math.max(workingSet * textureBytes(texW, texH), 32 * 1024 * 1024);
+    textureBudgetBytes ??
+    Math.max(
+      Math.ceil(
+        1.5 *
+          inFlight.reduce((total, index) => {
+            const r = rasterOf(index);
+            return total + textureBytes(r.w, r.h);
+          }, 0),
+      ),
+      32 * 1024 * 1024,
+    );
 
   if (cacheRef.current === null) {
     cacheRef.current = new PageTextureCache({ budgetBytes });
@@ -251,13 +328,13 @@ export function PageCurlView({
     const cache = cacheRef.current;
     if (cache === null) return;
 
-    const keyFor = (index: number): PageKey => ({
+    const keyFor = (index: number, raster: { w: number; h: number }): PageKey => ({
       documentId,
       documentGeneration: generations.document,
       layoutGeneration: generations.layout,
       pageIndex: index,
-      renderWidth: texW,
-      renderHeight: texH,
+      renderWidth: raster.w,
+      renderHeight: raster.h,
       rotation: 0,
       appearance,
     });
@@ -268,14 +345,13 @@ export function PageCurlView({
 
     // Retained the moment it exists, not after every read has finished.
     // peek() does not retain, so a later set() in the same pass could evict
-    // and DISPOSE an image this pass was still holding -- and a disposed
-    // SkImage draws nothing. Paging back and forth accumulates enough
-    // distinct pages to cross the budget mid-pass, which is exactly when the
-    // reader went blank.
+    // an image this pass was still holding -- and a disposed SkImage draws
+    // nothing.
     const runRetained: PageKey[] = [];
-    const read = async (index: number): Promise<SkImage | null> => {
-      if (index < 0 || index >= source.pageCount) return null;
-      const key = keyFor(index);
+    const read = async (index: number | null): Promise<SkImage | null> => {
+      if (index === null || index < 0 || index >= source.pageCount) return null;
+      const raster = rasterOf(index);
+      const key = keyFor(index, raster);
 
       const hit = cache.peek(key);
       if (hit !== null) {
@@ -283,70 +359,139 @@ export function PageCurlView({
         return hit;
       }
 
-      const bytes = await source.readPageScaled(index, texW, texH);
+      const bytes = await source.readPageScaled(index, raster.w, raster.h);
       if (cancelled) return null;
       const image = makeImageFromBytes(bytes);
       if (image === null) return null;
-      const stored = cache.set(key, image, textureBytes(texW, texH));
+      const stored = cache.set(key, image, textureBytes(raster.w, raster.h));
       if (cache.retain(key) !== null) runRetained.push(key);
       return stored;
     };
 
-    /** Hand back everything this pass retained. */
-    const releaseRun = () => {
-      for (const key of runRetained) cache.release(key);
-      runRetained.length = 0;
+    /** Hand back everything a pass retained but the frame does not hold. */
+    const releaseRun = (keys: PageKey[]) => {
+      for (const key of keys) cache.release(key);
+      keys.length = 0;
     };
 
-    (async () => {
-      // Sequential, not Promise.all: a page decodes to megabytes of RGBA and
-      // several at once can fail the allocation silently.
-      const wanted = spread
-        ? [pageIndex, leafIndex, pageIndex + step, leafIndex + step,
-           pageIndex - step, leafIndex - step]
-        : [leafIndex, leafIndex + step, leafIndex - step];
-
-      const images = new Map<number, SkImage | null>();
-      for (const index of wanted) {
-        if (cancelled) {
-          releaseRun();
-          return;
-        }
-        images.set(index, await read(index));
-      }
-      if (cancelled) {
-        releaseRun();
-        return;
-      }
-
-      // Retain the new set before releasing the old, so nothing the shader is
-      // sampling is ever momentarily unreferenced.
-      // This pass's retains become the frame's retains; the previous frame's
-      // are handed back only now, so nothing the shader samples is ever
-      // momentarily unreferenced.
+    /**
+     * The visible pair becomes the frame; the previous frame lets go.
+     *
+     * Retain-then-release, never the reverse: releasing first can drop the
+     * last reference to an image the shader is sampling this very frame.
+     */
+    const replaceFrameRetains = () => {
       const previous = retainedRef.current;
       retainedRef.current = [...runRetained];
       runRetained.length = 0;
       for (const key of previous) cache.release(key);
+    };
 
+    /**
+     * The neighbours join the frame.
+     *
+     * Appended, not swapped in: the visible pair is still on screen and must
+     * keep its retains, or the next eviction disposes the page being drawn.
+     */
+    const addFrameRetains = () => {
+      retainedRef.current = [...retainedRef.current, ...runRetained];
+      runRetained.length = 0;
+    };
+
+    const here = planSpreadAt(groups, pageIndex);
+    /** Left and right slot for a group: a solo page occupies the right slot. */
+    const slotsOf = (group: { start: number; size: number } | null) =>
+      group === null
+        ? { left: null, right: null }
+        : {
+            left: group.size === 2 ? group.start : null,
+            right: group.start + group.size - 1,
+          };
+    const from = slotsOf({ start: here.pages[0], size: here.step });
+    const to = slotsOf(here.next);
+    const prev = slotsOf(here.previous);
+
+    (async () => {
+      // Sequential, not Promise.all: a page decodes to megabytes of RGBA and
+      // several at once can fail the allocation silently.
+      //
+      // Two passes, because the reader is waiting on the first one. The pages
+      // you can SEE are published as soon as they exist -- that publish is
+      // what clears the turn guard -- and the neighbours the curl will need
+      // are filled in behind it. Loading all six before publishing anything
+      // is what made a back-turn sit on a frozen curl: the spread behind the
+      // one you just landed on had never been prefetched, so every back-turn
+      // waited on two fresh decodes before the reader came back to life.
+      const fromLeft = await read(from.left);
+      const fromRight = await read(from.right);
+      if (cancelled) {
+        releaseRun(runRetained);
+        return;
+      }
+      replaceFrameRetains();
       setPages({
-        fromLeft: spread ? images.get(pageIndex) ?? null : null,
-        fromRight: images.get(leafIndex) ?? null,
-        toLeft: spread ? images.get(pageIndex + step) ?? null : null,
-        toRight: images.get(leafIndex + step) ?? null,
-        prevLeft: spread ? images.get(pageIndex - step) ?? null : null,
-        prevRight: images.get(leafIndex - step) ?? null,
+        fromLeft,
+        fromRight,
+        toLeft: null,
+        toRight: null,
+        prevLeft: null,
+        prevRight: null,
       });
-      turning.value = false;
 
-      // Warm the spread after this one while the reader is looking at the
-      // current pages, so a turn never waits on a decode.
-      // Prefetch is a warm-up, not a frame dependency: release its retains as
-      // soon as it lands, so it can be evicted under pressure.
-      if (!cancelled) void read(leafIndex + step + 1).then(releaseRun);
-      if (!cancelled) void read(leafIndex + step + 2).then(releaseRun);
+      // Laying the sheet flat is a write to the UI thread and lands at once;
+      // mounting the new textures goes through a React commit and lands a
+      // frame or two later. Reset progress first and the canvas draws the
+      // PREVIOUS page flat in between -- the page you just turned away from
+      // flashing back before the new one appears. Wait for the frames that
+      // carry the mount, then lay it flat.
+      //
+      // The destination halves stay unpublished until after that, so a curl
+      // sitting at full progress can only be showing the page that is about
+      // to become the flat one.
+      await nextFrames(2);
+      if (cancelled) return;
+      progress.value = 0;
+      turning.value = false;
+      onSpreadVisible?.(here.pages);
+
+      const toLeft = await read(to.left);
+      const toRight = await read(to.right);
+      const prevLeft = await read(prev.left);
+      const prevRight = await read(prev.right);
+      if (cancelled) {
+        releaseRun(runRetained);
+        return;
+      }
+      addFrameRetains();
+      setPages({ fromLeft, fromRight, toLeft, toRight, prevLeft, prevRight });
+
+      // Warm the spread beyond the one you are heading for, in the direction
+      // you are actually travelling. Prefetching forward while the reader
+      // pages backward warms pages they are walking away from and leaves the
+      // ones they are walking into cold.
+      const ahead =
+        travelRef.current >= 0
+          ? here.next && planSpreadAt(groups, here.next.start).next
+          : here.previous && planSpreadAt(groups, here.previous.start).previous;
+      const warm = slotsOf(ahead ?? null);
+      // A warm-up is not a frame dependency: release its retains as soon as
+      // it lands so it can be evicted under pressure.
+      const warmed: PageKey[] = [];
+      const takeWarm = () => {
+        warmed.push(...runRetained);
+        runRetained.length = 0;
+      };
+      if (!cancelled) {
+        await read(warm.left);
+        takeWarm();
+      }
+      if (!cancelled) {
+        await read(warm.right);
+        takeWarm();
+      }
+      releaseRun(warmed);
     })().catch((error) => {
-      releaseRun();
+      releaseRun(runRetained);
       if (cancelled) return;
       // Release the turn guard, or a failed load locks the reader on a page
       // it never managed to draw.
@@ -356,12 +501,12 @@ export function PageCurlView({
     return () => {
       cancelled = true;
     };
-    // texW/texH are in the list on purpose: they change with the viewport and
-    // the pixel density, and leaving them out is why rotating the device used
-    // to leave correctly laid out pages rendered at the old raster size.
+    // width/height/gutter are in the list on purpose: the raster follows the
+    // viewport and the pixel density, and leaving them out is why rotating the
+    // device used to leave correctly laid out pages at the old raster size.
   }, [
-    source, documentId, pageIndex, leafIndex, spread, step,
-    texW, texH, appearance,
+    source, documentId, pageIndex, groups,
+    width, height, gutter, scale, appearance,
     generations.document, generations.layout,
   ]);
 
@@ -397,20 +542,6 @@ export function PageCurlView({
   // second swipe cannot commit again and skip a spread.
   const turning = useSharedValue(false);
 
-  // Lay the sheet flat only after React has committed the new pages. Doing
-  // it in the loader resets progress on the UI thread while the OLD textures
-  // are still bound, which shows the previous spread flat for a frame — the
-  // blink on a turn.
-  // Keyed on the VISIBLE pair, not the whole pages object. The destination
-  // halves are published a moment later, and reacting to that second publish
-  // reset progress in the middle of an in-flight turn — which is a jump.
-  useEffect(() => {
-    if (pages.fromRight == null) return;
-    progress.value = 0;
-    turning.value = false;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pages.fromLeft, pages.fromRight]);
-
   const uniforms = useDerivedValue(() => ({
     progress: progress.value,
     resolution: [sheetW, sheetH],
@@ -420,12 +551,14 @@ export function PageCurlView({
 
   // Drag maps travel across the leaf to curl progress; release either falls
   // open or springs back. All of it stays on the UI thread.
-  const canGoBack = pageIndex - step >= 0;
+  const canGoBack = plan.previous !== null;
   // One callback the worklet can capture. Passing a *conditional* function
   // reference to scheduleOnRN leaves the gesture silently inert.
   const commitDirection = useCallback(
     (forward: boolean) => {
-      const next = forward ? pageIndex + step : pageIndex - step;
+      travelRef.current = forward ? 1 : -1;
+      const target = forward ? plan.next : plan.previous;
+      const next = target?.start ?? pageIndex;
       if (next === pageIndex || next < 0 || next >= source.pageCount) {
         // Nothing will load, so release the guard here or the reader locks.
         turning.value = false;
@@ -433,13 +566,18 @@ export function PageCurlView({
       }
       onPageIndexChange?.(next);
     },
-    [onPageIndexChange, pageIndex, step, source.pageCount, turning],
+    [onPageIndexChange, pageIndex, plan.next, plan.previous, source.pageCount, turning],
   );
 
   // Books turn both ways: dragging in from the outer edge turns forward,
   // dragging out from the spine side pulls the previous leaf back.
   const pan = Gesture.Pan()
-    .onBegin((event) => {
+    // A tap is not a turn. Without an activation threshold the gesture begins
+    // on touch-down, and the begin handler used to zero `progress` -- tapping
+    // the page mid-settle snapped the curl flat.
+    .activeOffsetX([-8, 8])
+    .failOffsetY([-24, 24])
+    .onStart((event) => {
       'worklet';
       if (turning.value) return;
       const forward = rtl
@@ -478,14 +616,40 @@ export function PageCurlView({
       const flicked = Math.abs(away) > FLICK_VELOCITY;
       const commit = flicked ? away > 0 : progress.value > COMMIT_AT;
 
+      // Continue at the speed the finger was moving. A fixed-duration tween
+      // starts from a dead stop no matter how hard the page was flicked, which
+      // is the hitch between letting go and the page falling open -- and at
+      // the other extreme it crawls when the page is already nearly over.
+      // Velocity is in pixels/s; the curl is in progress units, where 1 is
+      // half the sheet.
+      const velocity = away / (sheetW / 2);
       if (commit) {
         turning.value = true;
-        progress.value = withTiming(1, { duration: 280 }, (finished) => {
-          'worklet';
-          if (finished) scheduleOnRN(commitDirection, forward);
-        });
+        // Clamped to the direction it is going. A drag dragged past the
+        // halfway mark and then let go while easing back releases with the
+        // velocity pointing the other way -- the page lurched backwards
+        // before falling open, and the turn committed late enough that the
+        // page counter ran ahead of the page.
+        progress.value = withSpring(
+          1,
+          {
+            velocity: Math.max(velocity, 0),
+            damping: 26,
+            stiffness: 260,
+            overshootClamping: true,
+          },
+          (finished) => {
+            'worklet';
+            if (finished) scheduleOnRN(commitDirection, forward);
+          },
+        );
       } else {
-        progress.value = withSpring(0, { damping: 20, stiffness: 180 });
+        progress.value = withSpring(0, {
+          velocity: Math.min(velocity, 0),
+          damping: 22,
+          stiffness: 200,
+          overshootClamping: true,
+        });
       }
     });
 
@@ -512,7 +676,16 @@ export function PageCurlView({
   return (
     <View style={{ width, height }}>
       <GestureDetector gesture={pan}>
-        <Canvas style={{ width, height }}>
+        {/*
+          opaque puts the canvas on Android's SurfaceView path instead of a
+          TextureView. A TextureView hands every frame back through the view
+          hierarchy, so a full-screen reader pays a 2700x1800 composite on the
+          UI thread per frame -- measured at 44-79ms a frame during a turn
+          while the GPU itself was under 10ms, which is why the curl drew one
+          intermediate frame and then snapped. A book page is fully opaque, so
+          nothing is lost by saying so.
+        */}
+        <Canvas style={{ width, height }} opaque>
           <Group transform={[{ translateX: sheetX }, { translateY: sheetY }]}>
             {ready ? (
               <Rect {...sheetRect}>
