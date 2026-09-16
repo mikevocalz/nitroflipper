@@ -1,6 +1,0 @@
-/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/android/.cxx/Debug/u6s4q252/prefab/armeabi-v7a/prefab/lib/arm-linux-androideabi/cmake/ReactAndroid/ReactAndroidConfig.cmake
-/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/android/.cxx/Debug/u6s4q252/prefab/armeabi-v7a/prefab/lib/arm-linux-androideabi/cmake/ReactAndroid/ReactAndroidConfigVersion.cmake
-/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/android/.cxx/Debug/u6s4q252/prefab/armeabi-v7a/prefab/lib/arm-linux-androideabi/cmake/fbjni/fbjniConfig.cmake
-/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/android/.cxx/Debug/u6s4q252/prefab/armeabi-v7a/prefab/lib/arm-linux-androideabi/cmake/fbjni/fbjniConfigVersion.cmake
-/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/android/.cxx/Debug/u6s4q252/prefab/armeabi-v7a/prefab/lib/arm-linux-androideabi/cmake/react-native-nitro-modules/react-native-nitro-modulesConfig.cmake
-/Users/mikevocalz/NitroFlipper/example/node_modules/nitro-flipper/android/CMakeLists.txt
