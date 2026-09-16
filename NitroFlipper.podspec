@@ -25,6 +25,9 @@ Pod::Spec.new do |s|
 
   s.pod_target_xcconfig = {
     "CLANG_CXX_LANGUAGE_STANDARD" => "c++20",
+    # Page decoding is CPU-bound C++ and a Debug pod builds at -O0, which on
+    # device costs seconds per page turn. Optimize this pod in Debug too.
+    "GCC_OPTIMIZATION_LEVEL[config=Debug]" => "2",
     "HEADER_SEARCH_PATHS" => [
       "\"$(PODS_TARGET_SRCROOT)/cpp\"",
       "\"$(PODS_TARGET_SRCROOT)/cpp/mupdf\"",

@@ -30,6 +30,13 @@ target_include_directories(
   ../cpp/vendor/stb
 )
 
+# Decoding a page is CPU-bound C++, and a Debug variant compiles it at -O0.
+# Measured on a Surface Duo, one page goes from 334ms to 1713ms -- the resize
+# alone from 41ms to 817ms -- so every turn in a dev build waits seconds on a
+# decode that is fast in release. Stepping through stb and miniz is not worth
+# a reader that lags; the rest of the app keeps the variant's own settings.
+target_compile_options(NitroFlipper PRIVATE $<$<CONFIG:Debug>:-O2>)
+
 # --- MuPDF document engine (PDF + EPUB) --------------------------------------
 #
 # On by default. Turning it off drops PDF and EPUB and leaves CBZ working, for
