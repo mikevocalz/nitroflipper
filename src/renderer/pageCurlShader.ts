@@ -26,13 +26,15 @@ uniform float2 resolution;
 uniform float halfW;
 // 1 = turning forward (right leaf lifts), -1 = turning back (left leaf lifts).
 uniform float dir;
+// Physical curl direction is reversed for right-to-left books.
+uniform float mirror;
 
 // The sheet spans the whole spread so the curl can travel across the spine
 // onto the other page, the way a real leaf does. Each half is a separate
 // image, so no offscreen compositing is needed.
 float2 sheetToScreen(float2 uv) {
   float2 p = uv;
-  if (dir < 0.0) { p.x = 1.0 - p.x; }
+  if (mirror < 0.0) { p.x = 1.0 - p.x; }
   return p * resolution;
 }
 
@@ -93,7 +95,7 @@ vec4 seeThrough(float yc, vec2 p, mat3 rotation, mat3 rrotation)
 {
         float amount = progress * (MAX_AMOUNT - MIN_AMOUNT) + MIN_AMOUNT;
         float cylinderAngle = 2.0 * PI * amount;
-        float hitAngle = PI - (acos(yc / cylinderRadius) - cylinderAngle);
+        float hitAngle = PI - (acos(clamp(yc / cylinderRadius, -1.0, 1.0)) - cylinderAngle);
         vec3 point = hitPoint(hitAngle, yc, rotation * vec3(p, 1.0), rrotation);
         if (yc <= 0.0 && (point.x < 0.0 || point.y < 0.0 || point.x > 1.0 || point.y > 1.0))
         {
@@ -145,7 +147,7 @@ vec4 behindSurface(vec2 p, float yc, vec3 point, mat3 rrotation)
 
         yc = (-cylinderRadius - cylinderRadius - yc);
 
-        float hitAngle = (acos(yc / cylinderRadius) + cylinderAngle) - PI;
+        float hitAngle = (acos(clamp(yc / cylinderRadius, -1.0, 1.0)) + cylinderAngle) - PI;
         point = hitPoint(hitAngle, yc, point, rrotation);
 
         if (yc < 0.0 && point.x >= 0.0 && point.y >= 0.0 && point.x <= 1.0 && point.y <= 1.0 && (hitAngle < PI || amount > 0.5))
@@ -195,7 +197,7 @@ vec4 transition(vec2 p) {
                 return getFromColor(p);
         }
         float cylinderAngle = 2.0 * PI * amount;
-        float hitAngle = (acos(yc / cylinderRadius) + cylinderAngle) - PI;
+        float hitAngle = (acos(clamp(yc / cylinderRadius, -1.0, 1.0)) + cylinderAngle) - PI;
 
         float hitAngleMod = mod(hitAngle, 2.0 * PI);
         if ((hitAngleMod > PI && amount < 0.5) || (hitAngleMod > PI/2.0 && amount < 0.0))
@@ -237,7 +239,11 @@ vec4 transition(vec2 p) {
 half4 main(vec2 xy) {
   vec2 uv = xy / resolution;
   // Turning back is the same curl mirrored about the spine.
-  if (dir < 0.0) { uv.x = 1.0 - uv.x; }
+  if (mirror < 0.0) { uv.x = 1.0 - uv.x; }
+  // Exact endpoints avoid both needless cylinder work at rest and a shaded
+  // destination flashing to a different flat image when the turn commits.
+  if (progress <= 0.0) return getFromColor(uv);
+  if (progress >= 1.0) return getToColor(uv);
   return half4(transition(uv));
 }
 `;

@@ -143,6 +143,15 @@ export class PageTextureCache {
    * orphan.
    */
   set(key: PageKey, image: SkImage, bytes: number): SkImage {
+    return this.insert(key, image, bytes, false);
+  }
+
+  /** Pin before enforcing the budget: even an oversize image must survive. */
+  setAndRetain(key: PageKey, image: SkImage, bytes: number): SkImage {
+    return this.insert(key, image, bytes, true);
+  }
+
+  private insert(key: PageKey, image: SkImage, bytes: number, retain: boolean): SkImage {
     const id = pageKeyOf(key);
     // One entry per id, ALWAYS -- including ids that only survive in `held`.
     // A second entry under a live id makes release() land on the wrong one:
@@ -151,6 +160,7 @@ export class PageTextureCache {
     // a blank page while paging back and forth over the same spread.
     const existing = this.entries.get(id) ?? this.held.get(id);
     if (existing !== undefined) {
+      if (retain) this.retain(key);
       if (existing.image !== image) {
         image.dispose();
       }
@@ -159,13 +169,15 @@ export class PageTextureCache {
     }
 
     this.clock += 1;
-    this.entries.set(id, {
+    const entry: Entry = {
       image,
       bytes,
-      retainCount: 0,
+      retainCount: retain ? 1 : 0,
       evicted: false,
       lastUsed: this.clock,
-    });
+    };
+    this.entries.set(id, entry);
+    if (retain) this.held.set(id, entry);
     this.bytesUsed += bytes;
     this.evictToBudget();
     return image;
