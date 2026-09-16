@@ -16,3 +16,6 @@ build-mupdf/
 # scripts/build-mupdf-apple.sh at pod install time.
 ios/generated/
 build/
+
+# Device E2E artifacts (screenshots, reports)
+e2e-artifacts/
