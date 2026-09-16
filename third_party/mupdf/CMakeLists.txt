@@ -29,11 +29,20 @@ if(MUPDF_SOURCE_DIR)
   message(STATUS "MuPDF: using local tree ${MUPDF_DIR}")
 else()
   include(FetchContent)
+  # DOWNLOAD_EXTRACT_TIMESTAMP only exists from CMake 3.24. Android Studio
+  # ships 3.22.1, where the unknown keyword is not rejected -- it is appended
+  # to the preceding URL_HASH, which then fails to parse as ALGO=hex. Passing
+  # it conditionally is the difference between building and a confusing hash
+  # error that has nothing to do with the hash.
+  set(MUPDF_FETCH_EXTRA "")
+  if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+    set(MUPDF_FETCH_EXTRA DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+  endif()
   FetchContent_Declare(
     mupdf
     URL "https://mupdf.com/downloads/archive/mupdf-${MUPDF_VERSION}-source.tar.gz"
     URL_HASH "SHA256=${MUPDF_URL_SHA256}"
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    ${MUPDF_FETCH_EXTRA}
   )
   FetchContent_MakeAvailable(mupdf)
   set(MUPDF_DIR "${mupdf_SOURCE_DIR}")

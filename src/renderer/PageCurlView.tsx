@@ -24,6 +24,11 @@ import type { PageBox, PageSource } from '../types';
 import { shouldUseSpread } from '../pagination/SpreadPolicy';
 import { PAGE_CURL_SKSL } from './pageCurlShader';
 import { createPageStore, type PageStore } from './pageStore';
+import {
+  PageTextureCache,
+  textureBytes,
+  type PageKey,
+} from './PageTextureCache';
 
 interface PageCurlViewProps {
   source: PageSource;
@@ -50,6 +55,40 @@ interface PageCurlViewProps {
    * turns in the same direction each animate.
    */
   turnRequest?: { dir: number; id: number };
+  /**
+   * Stable identity for the document being shown.
+   *
+   * Part of the texture cache key, so swapping documents cannot serve the
+   * previous book's page 7 for the new book's page 7. Defaults to a per-view
+   * constant, which is correct while a view shows one document for its life.
+   */
+  documentId?: string;
+  /**
+   * Hash of anything that changes pixels without changing the page: theme,
+   * font size, user CSS. Part of the cache key.
+   */
+  appearance?: string;
+  /**
+   * Ceiling for decoded page textures, in bytes.
+   *
+   * Counting images is not a memory bound -- six tablet pages at 3x are not
+   * six phone pages at 2x. Default is six 1080x1920 RGBA pages.
+   */
+  textureBudgetBytes?: number;
+}
+
+/** Generations to key the cache on, when the source publishes them. */
+function sourceGenerations(source: PageSource): {
+  document: number;
+  layout: number;
+} {
+  // MuPDFSource publishes these; ComicArchiveSource does not, and a CBZ has
+  // neither a relayout nor a reopen that changes its pages, so zeros are
+  // correct rather than a placeholder.
+  const withGenerations = source as PageSource & {
+    generations?: { document: number; layout: number };
+  };
+  return withGenerations.generations ?? { document: 0, layout: 0 };
 }
 
 function makeImageFromBytes(bytes: ArrayBuffer) {
@@ -72,6 +111,9 @@ export function PageCurlView({
   gutter = 0,
   onLayoutChange,
   turnRequest,
+  documentId = 'default',
+  appearance = 'default',
+  textureBudgetBytes = 6 * 1080 * 1920 * 4,
 }: PageCurlViewProps) {
   // The whole animation is one scalar on the UI thread. The curl itself is
   // evaluated per pixel by the shader, so a frame costs no JS at all.
@@ -160,76 +202,119 @@ export function PageCurlView({
   const setPages = storeRef.current.getState().setPages;
 
   // Decoded pages are reused across turns: the spread you turn *to* becomes
-  // the spread you turn *from*, so re-decoding it costs ~24MB for nothing and
-  // the churn is what greys the page out after a few turns.
-  const cacheRef = useRef(new Map<number, SkImage>());
+  // the spread you turn *from*, so re-decoding it costs megabytes for nothing.
+  //
+  // Keyed on full identity, not page index. Index alone collides across
+  // relayouts, viewport changes and document swaps -- see
+  // docs/adr/0003-cache-identity-and-budget.md.
+  const cacheRef = useRef<PageTextureCache | null>(null);
+  if (cacheRef.current === null) {
+    cacheRef.current = new PageTextureCache({ budgetBytes: textureBudgetBytes });
+  }
+  // What the frame currently on screen is holding, so it can be released only
+  // once its replacement is up. Dispose-on-load is what could pull a texture
+  // out from under the shader mid-curl.
+  const retainedRef = useRef<PageKey[]>([]);
+
+  const scale = PixelRatio.get();
+  const texW = Math.ceil(leafFit.w * scale);
+  const texH = Math.ceil(leafFit.h * scale);
+  const generations = sourceGenerations(source);
 
   useEffect(() => {
     let cancelled = false;
     const cache = cacheRef.current;
+    if (cache === null) return;
 
-    // Decode at the size the page is drawn. A source page is several times
-    // the slot it lands in, and holding pages at source resolution is what
-    // starves the decoder while paging through a book.
-    const texW = Math.ceil(leafFit.w * PixelRatio.get());
-    const texH = Math.ceil(leafFit.h * PixelRatio.get());
+    const keyFor = (index: number): PageKey => ({
+      documentId,
+      documentGeneration: generations.document,
+      layoutGeneration: generations.layout,
+      pageIndex: index,
+      renderWidth: texW,
+      renderHeight: texH,
+      rotation: 0,
+      appearance,
+    });
 
-    const read = async (index: number) => {
+    // A relayout or a new document invalidates everything that came before,
+    // so a late loader cannot repopulate a retired cache.
+    cache.invalidateExcept(documentId, generations.document, generations.layout);
+
+    const read = async (index: number): Promise<SkImage | null> => {
       if (index < 0 || index >= source.pageCount) return null;
-      const hit = cache.get(index);
-      if (hit) return hit;
-      const img = makeImageFromBytes(
-        await source.readPageScaled(index, texW, texH),
-      );
-      if (img) cache.set(index, img);
-      return img;
+      const key = keyFor(index);
+      const hit = cache.peek(key);
+      if (hit !== null) return hit;
+
+      const bytes = await source.readPageScaled(index, texW, texH);
+      if (cancelled) return null;
+      const image = makeImageFromBytes(bytes);
+      if (image === null) return null;
+      return cache.set(key, image, textureBytes(texW, texH));
     };
 
     (async () => {
-      // Sequential, not Promise.all: a comic page decodes to ~24MB of RGBA
-      // and decoding several at once can fail the allocation silently.
-      const fromLeft = spread ? await read(pageIndex) : null;
-      if (cancelled) return;
-      const fromRight = await read(leafIndex);
-      if (cancelled) return;
-      const toLeft = spread ? await read(pageIndex + step) : null;
-      if (cancelled) return;
-      const toRight = await read(leafIndex + step);
-      if (cancelled) return;
-      // The spread behind us, so a backward turn has something to uncover.
-      const prevLeft = spread ? await read(pageIndex - step) : null;
-      if (cancelled) return;
-      const prevRight = await read(leafIndex - step);
-      if (cancelled) return;
+      // Sequential, not Promise.all: a page decodes to megabytes of RGBA and
+      // several at once can fail the allocation silently.
+      const wanted = spread
+        ? [pageIndex, leafIndex, pageIndex + step, leafIndex + step,
+           pageIndex - step, leafIndex - step]
+        : [leafIndex, leafIndex + step, leafIndex - step];
 
-      // Hold only the four half-pages in use and free the rest. Evicting
-      // from the map is not enough: without dispose() the native bitmap
-      // stays alive, and a comic page is ~24MB, so paging through the book
-      // starves the decoder and pages come back null (grey).
-      const keep = new Set([
-        pageIndex - step, leafIndex - step,
-        pageIndex, leafIndex,
-        pageIndex + step, leafIndex + step,
-      ]);
-      for (const [key, img] of Array.from(cache.entries())) {
-        if (!keep.has(key)) {
-          cache.delete(key);
-          img.dispose();
-        }
+      const images = new Map<number, SkImage | null>();
+      for (const index of wanted) {
+        if (cancelled) return;
+        images.set(index, await read(index));
       }
+      if (cancelled) return;
 
-      setPages({ fromLeft, fromRight, toLeft, toRight, prevLeft, prevRight });
+      // Retain the new set before releasing the old, so nothing the shader is
+      // sampling is ever momentarily unreferenced.
+      const nextRetained = wanted
+        .filter((index) => images.get(index) != null)
+        .map(keyFor);
+      for (const key of nextRetained) cache.retain(key);
+      for (const key of retainedRef.current) cache.release(key);
+      retainedRef.current = nextRetained;
+
+      setPages({
+        fromLeft: spread ? images.get(pageIndex) ?? null : null,
+        fromRight: images.get(leafIndex) ?? null,
+        toLeft: spread ? images.get(pageIndex + step) ?? null : null,
+        toRight: images.get(leafIndex + step) ?? null,
+        prevLeft: spread ? images.get(pageIndex - step) ?? null : null,
+        prevRight: images.get(leafIndex - step) ?? null,
+      });
       turning.value = false;
 
       // Warm the spread after this one while the reader is looking at the
       // current pages, so a turn never waits on a decode.
-      void read(leafIndex + step + 1);
+      if (!cancelled) void read(leafIndex + step + 1);
       if (!cancelled) void read(leafIndex + step + 2);
     })();
     return () => {
       cancelled = true;
     };
-  }, [source, pageIndex, leafIndex, spread, step]);
+    // texW/texH are in the list on purpose: they change with the viewport and
+    // the pixel density, and leaving them out is why rotating the device used
+    // to leave correctly laid out pages rendered at the old raster size.
+  }, [
+    source, documentId, pageIndex, leafIndex, spread, step,
+    texW, texH, appearance,
+    generations.document, generations.layout,
+  ]);
+
+  // Release the frame's textures when the reader goes away, or they outlive it.
+  useEffect(() => {
+    const cache = cacheRef.current;
+    return () => {
+      if (cache === null) return;
+      for (const key of retainedRef.current) cache.release(key);
+      retainedRef.current = [];
+      cache.clear();
+    };
+  }, []);
 
   // The sheet covers both halves; each image sits in its own half.
   const sheetW = spread ? leftFit.w + gutter + leafFit.w : leafFit.w;
