@@ -19,3 +19,10 @@ build/
 
 # Device E2E artifacts (screenshots, reports)
 e2e-artifacts/
+
+# Native build trees. A MuPDF build drops a 175MB static library in here, over
+# GitHub's hard file-size limit, and the whole tree is regenerable from
+# scripts/fetch-mupdf.sh plus a cmake run.
+build-android/
+build-ios-sim/
+build-ios-device/
