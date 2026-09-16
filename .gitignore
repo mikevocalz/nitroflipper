@@ -9,3 +9,4 @@ android/build
 .idea
 .gradle
 .cxx
+*.cbz
