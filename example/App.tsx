@@ -32,7 +32,7 @@ import { ReaderChrome } from './src/ReaderChrome';
  * works on a device, and a picker would be UI to debug before the thing it
  * is meant to be testing.
  */
-const FORMAT: 'cbz' | 'pdf' | 'epub' = 'pdf';
+const FORMAT: 'cbz' | 'pdf' | 'epub' = 'epub';
 
 const FIXTURES = {
   cbz: { asset: ltrAsset, name: 'sample.cbz' },
@@ -139,6 +139,9 @@ export default function App(): React.JSX.Element {
             gutter={0}
             onLayoutChange={useReaderStore.getState().setLayout}
             turnRequest={turnRequest}
+            onPageLoadError={(e) =>
+              useReaderStore.getState().setError(`page load failed: ${String(e)}`)
+            }
           />
         )}
         {source && <ReaderChrome />}

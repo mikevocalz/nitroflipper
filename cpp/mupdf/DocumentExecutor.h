@@ -63,7 +63,15 @@ class DocumentExecutor : public std::enable_shared_from_this<DocumentExecutor> {
    * the job resolves the JS promise directly from the worker, so an operation
    * is one hop with no extra thread.
    */
-  void enqueue(std::function<void(MuPDFDocument*)> job);
+  /**
+   * @param afterPublish runs on the worker thread once `job` has returned AND
+   *        the resulting snapshot has been published. Settle JS promises here,
+   *        not inside `job`: resolving from inside means the JS continuation
+   *        can read `pageCount` before the snapshot that carries it is
+   *        published, and see 0 for a document that just opened.
+   */
+  void enqueue(std::function<void(MuPDFDocument*)> job,
+               std::function<void()> afterPublish = {});
 
   /**
    * Stop accepting work, abandon what is queued, and join the thread.

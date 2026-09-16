@@ -46,21 +46,26 @@ void DocumentExecutor::run() {
   }
 }
 
-void DocumentExecutor::enqueue(std::function<void(MuPDFDocument*)> job) {
+void DocumentExecutor::enqueue(std::function<void(MuPDFDocument*)> job,
+                               std::function<void()> afterPublish) {
   auto self = shared_from_this();
 
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!stopping_) {
-      queue_.push_back([self, job]() {
+      queue_.push_back([self, job, afterPublish]() {
         // nullptr tells the job the document is gone. Re-checked here rather
         // than only at enqueue time, because shutdown can land in between.
         if (self->cancelled_.load(std::memory_order_acquire)) {
           job(nullptr);
+          if (afterPublish) afterPublish();
           return;
         }
         job(self->document_.get());
+        // Publish before the continuation runs, so anything the JS side reads
+        // synchronously after its promise settles sees this job's state.
         self->publish(self->document_->snapshot());
+        if (afterPublish) afterPublish();
       });
       cv_.notify_one();
       return;
@@ -72,6 +77,7 @@ void DocumentExecutor::enqueue(std::function<void(MuPDFDocument*)> job) {
   // forever. Deliberately outside the lock: the job settles a promise, and a
   // promise continuation can run arbitrary code.
   job(nullptr);
+  if (afterPublish) afterPublish();
 }
 
 void DocumentExecutor::shutdown() noexcept {

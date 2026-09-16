@@ -29,27 +29,43 @@ HybridMuPDFFactory::openDocument(const std::string& path,
   auto executor = engine::DocumentExecutor::make();
   const std::string pw = password.value_or(std::string{});
 
-  executor->enqueue([promise, executor, path, pw](engine::MuPDFDocument* document) {
-    if (document == nullptr) {
-      promise->reject(std::make_exception_ptr(
-          std::runtime_error("mupdf/cancelled: closed before open completed")));
-      return;
-    }
-    try {
-      document->open(path, pw);
-      // Resolves only once parsing has succeeded, so there is no window where
-      // JS holds a document whose page count is a lie.
-      promise->resolve(std::make_shared<HybridMuPDFDocument>(executor));
-    } catch (const engine::Error& error) {
-      // The executor is dropped with this lambda, taking its worker thread and
-      // fitz context with it. A failed open leaves nothing running.
-      promise->reject(std::make_exception_ptr(std::runtime_error(
-          std::string("mupdf/") + errorCodeString(error.kind()) + ": " +
-          error.what())));
-    } catch (...) {
-      promise->reject(std::current_exception());
-    }
-  });
+  // Parsing happens in the job; the promise settles only after the snapshot
+  // has been published. Resolving inside the job let JS read pageCount before
+  // the open had published one, so a freshly opened book reported 0 pages and
+  // prefetched no page boxes.
+  auto settle = std::make_shared<std::function<void()>>();
+
+  executor->enqueue(
+      [promise, executor, path, pw, settle](engine::MuPDFDocument* document) {
+        if (document == nullptr) {
+          *settle = [promise] {
+            promise->reject(std::make_exception_ptr(std::runtime_error(
+                "mupdf/cancelled: closed before open completed")));
+          };
+          return;
+        }
+        try {
+          document->open(path, pw);
+          *settle = [promise, executor] {
+            promise->resolve(std::make_shared<HybridMuPDFDocument>(executor));
+          };
+        } catch (const engine::Error& error) {
+          // The executor is dropped with this lambda, taking its worker thread
+          // and fitz context with it. A failed open leaves nothing running.
+          auto message = std::string("mupdf/") + errorCodeString(error.kind()) +
+                         ": " + error.what();
+          *settle = [promise, message] {
+            promise->reject(
+                std::make_exception_ptr(std::runtime_error(message)));
+          };
+        } catch (...) {
+          auto captured = std::current_exception();
+          *settle = [promise, captured] { promise->reject(captured); };
+        }
+      },
+      [settle] {
+        if (*settle) (*settle)();
+      });
 
   return promise;
 }

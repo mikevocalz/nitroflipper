@@ -75,6 +75,13 @@ interface PageCurlViewProps {
    * six phone pages at 2x. Default is six 1080x1920 RGBA pages.
    */
   textureBudgetBytes?: number;
+  /**
+   * Called when a page fails to load.
+   *
+   * Without this a rejection inside the loader is an unhandled promise and the
+   * reader just stays blank -- no page, no error, nothing to act on.
+   */
+  onPageLoadError?: (error: unknown) => void;
 }
 
 /** Generations to key the cache on, when the source publishes them. */
@@ -114,6 +121,7 @@ export function PageCurlView({
   documentId = 'default',
   appearance = 'default',
   textureBudgetBytes = 6 * 1080 * 1920 * 4,
+  onPageLoadError,
 }: PageCurlViewProps) {
   // The whole animation is one scalar on the UI thread. The curl itself is
   // evaluated per pixel by the shader, so a frame costs no JS at all.
@@ -292,7 +300,13 @@ export function PageCurlView({
       // current pages, so a turn never waits on a decode.
       if (!cancelled) void read(leafIndex + step + 1);
       if (!cancelled) void read(leafIndex + step + 2);
-    })();
+    })().catch((error) => {
+      if (cancelled) return;
+      // Release the turn guard, or a failed load locks the reader on a page
+      // it never managed to draw.
+      turning.value = false;
+      onPageLoadError?.(error);
+    });
     return () => {
       cancelled = true;
     };

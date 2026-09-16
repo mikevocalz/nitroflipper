@@ -82,27 +82,44 @@ std::shared_ptr<Promise<T>> runOnExecutor(
     return promise;
   }
 
-  executor->enqueue([promise, work](Document* document) {
-    if (document == nullptr) {
-      promise->reject(std::make_exception_ptr(
-          std::runtime_error("mupdf/cancelled: document was closed")));
-      return;
-    }
-    try {
-      if constexpr (std::is_void_v<T>) {
-        work(*document);
-        promise->resolve();
-      } else {
-        promise->resolve(work(*document));
-      }
-    } catch (const Error& error) {
-      promise->reject(std::make_exception_ptr(std::runtime_error(
-          std::string("mupdf/") + errorCodeString(error.kind()) + ": " +
-          error.what())));
-    } catch (...) {
-      promise->reject(std::current_exception());
-    }
-  });
+  // The work runs in `job`; the promise is settled in `afterPublish`. Settling
+  // inside `job` lets the JS continuation read a snapshot this job has not
+  // published yet -- which showed up as a freshly opened document reporting
+  // pageCount 0.
+  auto settle = std::make_shared<std::function<void()>>();
+
+  executor->enqueue(
+      [promise, work, settle](Document* document) {
+        if (document == nullptr) {
+          *settle = [promise] {
+            promise->reject(std::make_exception_ptr(
+                std::runtime_error("mupdf/cancelled: document was closed")));
+          };
+          return;
+        }
+        try {
+          if constexpr (std::is_void_v<T>) {
+            work(*document);
+            *settle = [promise] { promise->resolve(); };
+          } else {
+            auto result = std::make_shared<T>(work(*document));
+            *settle = [promise, result] { promise->resolve(std::move(*result)); };
+          }
+        } catch (const Error& error) {
+          auto message = std::string("mupdf/") + errorCodeString(error.kind()) +
+                         ": " + error.what();
+          *settle = [promise, message] {
+            promise->reject(
+                std::make_exception_ptr(std::runtime_error(message)));
+          };
+        } catch (...) {
+          auto captured = std::current_exception();
+          *settle = [promise, captured] { promise->reject(captured); };
+        }
+      },
+      [settle] {
+        if (*settle) (*settle)();
+      });
 
   return promise;
 }
