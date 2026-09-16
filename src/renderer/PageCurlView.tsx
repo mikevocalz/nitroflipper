@@ -72,7 +72,9 @@ interface PageCurlViewProps {
    * Ceiling for decoded page textures, in bytes.
    *
    * Counting images is not a memory bound -- six tablet pages at 3x are not
-   * six phone pages at 2x. Default is six 1080x1920 RGBA pages.
+   * six phone pages at 2x. Left unset, the budget is derived from the actual
+   * raster size and the number of pages a turn needs resident, which is the
+   * only way it cannot be smaller than the working set.
    */
   textureBudgetBytes?: number;
   /**
@@ -120,7 +122,7 @@ export function PageCurlView({
   turnRequest,
   documentId = 'default',
   appearance = 'default',
-  textureBudgetBytes = 6 * 1080 * 1920 * 4,
+  textureBudgetBytes,
   onPageLoadError,
 }: PageCurlViewProps) {
   // The whole animation is one scalar on the UI thread. The curl itself is
@@ -216,9 +218,6 @@ export function PageCurlView({
   // relayouts, viewport changes and document swaps -- see
   // docs/adr/0003-cache-identity-and-budget.md.
   const cacheRef = useRef<PageTextureCache | null>(null);
-  if (cacheRef.current === null) {
-    cacheRef.current = new PageTextureCache({ budgetBytes: textureBudgetBytes });
-  }
   // What the frame currently on screen is holding, so it can be released only
   // once its replacement is up. Dispose-on-load is what could pull a texture
   // out from under the shader mid-curl.
@@ -228,6 +227,24 @@ export function PageCurlView({
   const texW = Math.ceil(leafFit.w * scale);
   const texH = Math.ceil(leafFit.h * scale);
   const generations = sourceGenerations(source);
+
+  // A spread turn needs six pages resident -- the spread you are on, the one
+  // ahead and the one behind -- plus two prefetched. A budget smaller than
+  // that evicts a page the current frame is about to draw, then re-decodes it
+  // on the next swipe: the reader flickers and pages come back blank while
+  // paging back and forth. Ten pages leaves headroom over the eight in flight.
+  //
+  // The old fixed default was six 1080x1920 pages (47.5MB) while a spread on
+  // this device is six 1125x1800 pages (48.6MB) -- over budget on arrival.
+  const workingSet = spread ? 10 : 6;
+  const budgetBytes =
+    textureBudgetBytes ?? Math.max(workingSet * textureBytes(texW, texH), 32 * 1024 * 1024);
+
+  if (cacheRef.current === null) {
+    cacheRef.current = new PageTextureCache({ budgetBytes });
+  }
+  // The raster size changes with the viewport, so the budget has to follow it.
+  cacheRef.current.setBudget(budgetBytes);
 
   useEffect(() => {
     let cancelled = false;
@@ -249,17 +266,36 @@ export function PageCurlView({
     // so a late loader cannot repopulate a retired cache.
     cache.invalidateExcept(documentId, generations.document, generations.layout);
 
+    // Retained the moment it exists, not after every read has finished.
+    // peek() does not retain, so a later set() in the same pass could evict
+    // and DISPOSE an image this pass was still holding -- and a disposed
+    // SkImage draws nothing. Paging back and forth accumulates enough
+    // distinct pages to cross the budget mid-pass, which is exactly when the
+    // reader went blank.
+    const runRetained: PageKey[] = [];
     const read = async (index: number): Promise<SkImage | null> => {
       if (index < 0 || index >= source.pageCount) return null;
       const key = keyFor(index);
+
       const hit = cache.peek(key);
-      if (hit !== null) return hit;
+      if (hit !== null) {
+        if (cache.retain(key) !== null) runRetained.push(key);
+        return hit;
+      }
 
       const bytes = await source.readPageScaled(index, texW, texH);
       if (cancelled) return null;
       const image = makeImageFromBytes(bytes);
       if (image === null) return null;
-      return cache.set(key, image, textureBytes(texW, texH));
+      const stored = cache.set(key, image, textureBytes(texW, texH));
+      if (cache.retain(key) !== null) runRetained.push(key);
+      return stored;
+    };
+
+    /** Hand back everything this pass retained. */
+    const releaseRun = () => {
+      for (const key of runRetained) cache.release(key);
+      runRetained.length = 0;
     };
 
     (async () => {
@@ -272,19 +308,26 @@ export function PageCurlView({
 
       const images = new Map<number, SkImage | null>();
       for (const index of wanted) {
-        if (cancelled) return;
+        if (cancelled) {
+          releaseRun();
+          return;
+        }
         images.set(index, await read(index));
       }
-      if (cancelled) return;
+      if (cancelled) {
+        releaseRun();
+        return;
+      }
 
       // Retain the new set before releasing the old, so nothing the shader is
       // sampling is ever momentarily unreferenced.
-      const nextRetained = wanted
-        .filter((index) => images.get(index) != null)
-        .map(keyFor);
-      for (const key of nextRetained) cache.retain(key);
-      for (const key of retainedRef.current) cache.release(key);
-      retainedRef.current = nextRetained;
+      // This pass's retains become the frame's retains; the previous frame's
+      // are handed back only now, so nothing the shader samples is ever
+      // momentarily unreferenced.
+      const previous = retainedRef.current;
+      retainedRef.current = [...runRetained];
+      runRetained.length = 0;
+      for (const key of previous) cache.release(key);
 
       setPages({
         fromLeft: spread ? images.get(pageIndex) ?? null : null,
@@ -298,9 +341,12 @@ export function PageCurlView({
 
       // Warm the spread after this one while the reader is looking at the
       // current pages, so a turn never waits on a decode.
-      if (!cancelled) void read(leafIndex + step + 1);
-      if (!cancelled) void read(leafIndex + step + 2);
+      // Prefetch is a warm-up, not a frame dependency: release its retains as
+      // soon as it lands, so it can be evicted under pressure.
+      if (!cancelled) void read(leafIndex + step + 1).then(releaseRun);
+      if (!cancelled) void read(leafIndex + step + 2).then(releaseRun);
     })().catch((error) => {
+      releaseRun();
       if (cancelled) return;
       // Release the turn guard, or a failed load locks the reader on a page
       // it never managed to draw.

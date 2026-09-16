@@ -24,6 +24,8 @@ interface ReaderState {
   error: string | null;
   /** Engine error kind, so the UI branches on a value rather than a message. */
   errorKind: string | null;
+  /** Non-fatal message over a working reader. See setNotice. */
+  notice: string | null;
   size: Size;
   pageIndex: number;
   /** Reader chrome hides so the art owns the panel; tapping brings it back. */
@@ -56,6 +58,14 @@ interface ReaderState {
   setSource: (source: PageSource) => void;
   setError: (error: string, kind?: string) => void;
   clearError: () => void;
+  /**
+   * A transient, non-fatal message shown over a working reader.
+   *
+   * Distinct from `error`, which means the document could not be opened at
+   * all. A single page failing to render must not take the session down with
+   * it -- the other 600 pages still work.
+   */
+  setNotice: (notice: string | null) => void;
   setSize: (size: Size) => void;
   setPageIndex: (pageIndex: number) => void;
   toggleChrome: () => void;
@@ -75,6 +85,7 @@ export const useReaderStore = create<ReaderState>()((set) => ({
   source: null,
   error: null,
   errorKind: null,
+  notice: null,
   size: { width: 0, height: 0 },
   pageIndex: 0,
   chromeVisible: true,
@@ -92,6 +103,7 @@ export const useReaderStore = create<ReaderState>()((set) => ({
   setSource: (source) => set({ source, error: null, errorKind: null }),
   setError: (error, kind) => set({ error, errorKind: kind ?? null }),
   clearError: () => set({ error: null, errorKind: null }),
+  setNotice: (notice) => set({ notice }),
   setSize: (size) => set({ size }),
   setPageIndex: (pageIndex) => set({ pageIndex }),
   toggleChrome: () => set((s) => ({ chromeVisible: !s.chromeVisible })),

@@ -78,7 +78,28 @@ export class PageTextureCache {
   private clock = 0;
   private bytesUsed = 0;
 
-  constructor(private readonly options: PageTextureCacheOptions) {}
+  private budgetBytes: number;
+
+  constructor(private readonly options: PageTextureCacheOptions) {
+    this.budgetBytes = options.budgetBytes;
+  }
+
+  /**
+   * Change the ceiling.
+   *
+   * The raster size follows the viewport, so the budget has to follow it too.
+   * A budget fixed at construction is either too small after a rotation --
+   * evicting pages the current frame needs -- or wastefully large.
+   */
+  setBudget(bytes: number): void {
+    this.budgetBytes = bytes;
+    this.evictToBudget();
+  }
+
+  /** Current ceiling, for diagnostics. */
+  get budget(): number {
+    return this.budgetBytes;
+  }
 
   get size(): number {
     return this.entries.size;
@@ -205,7 +226,7 @@ export class PageTextureCache {
   }
 
   private evictToBudget(): void {
-    if (this.bytesUsed <= this.options.budgetBytes) {
+    if (this.bytesUsed <= this.budgetBytes) {
       return;
     }
     // Least-recently-used first. Retained entries leave the map but stay alive.
@@ -213,7 +234,7 @@ export class PageTextureCache {
       (a, b) => a[1].lastUsed - b[1].lastUsed,
     );
     for (const [id, entry] of ordered) {
-      if (this.bytesUsed <= this.options.budgetBytes) {
+      if (this.bytesUsed <= this.budgetBytes) {
         return;
       }
       this.remove(id, entry);

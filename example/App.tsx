@@ -160,8 +160,12 @@ export default function App(): React.JSX.Element {
             gutter={0}
             onLayoutChange={useReaderStore.getState().setLayout}
             turnRequest={turnRequest}
+            // A page that will not render is NOT a fatal document error.
+            // Routing it into `error` unmounted the reader and replaced the
+            // whole book with a red string the reader could not get out of.
+            // It is a transient notice over a still-usable reader.
             onPageLoadError={(e) =>
-              useReaderStore.getState().setError(`page load failed: ${String(e)}`)
+              useReaderStore.getState().setNotice(String(e))
             }
           />
         )}
