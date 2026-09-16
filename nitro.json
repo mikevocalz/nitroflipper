@@ -1,11 +1,15 @@
 {
   "$schema": "https://nitro.margelo.com/nitro.schema.json",
-  "cxxNamespace": ["nitroflipper"],
+  "cxxNamespace": [
+    "nitroflipper"
+  ],
   "ios": {
     "iosModuleName": "NitroFlipper"
   },
   "android": {
-    "androidNamespace": ["nitroflipper"],
+    "androidNamespace": [
+      "nitroflipper"
+    ],
     "androidCxxLibName": "NitroFlipper"
   },
   "autolinking": {
@@ -19,6 +23,12 @@
       "all": {
         "language": "c++",
         "implementationClassName": "HybridComicArchiveSource"
+      }
+    },
+    "MuPDFFactory": {
+      "all": {
+        "language": "c++",
+        "implementationClassName": "HybridMuPDFFactory"
       }
     }
   }

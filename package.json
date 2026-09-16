@@ -26,7 +26,8 @@
     "test:cpp": "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build --target pagecurlsolver_test comicarchive_test imagescaler_test && ./build/pagecurlsolver_test && ./build/comicarchive_test && ./build/imagescaler_test",
     "test:ts": "node --test --import=tsx 'src/**/*.test.ts'",
     "nitrogen": "npx nitrogen",
-    "test:mupdf": "cmake -S . -B build-mupdf -DCMAKE_BUILD_TYPE=Release -DNITROFLIPPER_WITH_MUPDF=ON && cmake --build build-mupdf --target mupdfdocument_test && ./build-mupdf/mupdfdocument_test"
+    "test:mupdf": "cmake -S . -B build-mupdf -DCMAKE_BUILD_TYPE=Release -DNITROFLIPPER_WITH_MUPDF=ON && cmake --build build-mupdf --target mupdfdocument_test && ./build-mupdf/mupdfdocument_test",
+    "specs": "nitrogen"
   },
   "keywords": [
     "react-native",
@@ -51,6 +52,7 @@
     "@shopify/react-native-skia": "^2.11.1",
     "@types/node": "^26.4.0",
     "@types/react": "^18.3.0",
+    "nitrogen": "0.37.1",
     "react": "^18.3.1",
     "react-native": "0.86.3",
     "react-native-gesture-handler": "2.32.0",

@@ -46,6 +46,34 @@ void DocumentExecutor::run() {
   }
 }
 
+void DocumentExecutor::enqueue(std::function<void(MuPDFDocument*)> job) {
+  auto self = shared_from_this();
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!stopping_) {
+      queue_.push_back([self, job]() {
+        // nullptr tells the job the document is gone. Re-checked here rather
+        // than only at enqueue time, because shutdown can land in between.
+        if (self->cancelled_.load(std::memory_order_acquire)) {
+          job(nullptr);
+          return;
+        }
+        job(self->document_.get());
+        self->publish(self->document_->snapshot());
+      });
+      cv_.notify_one();
+      return;
+    }
+  }
+
+  // Already shutting down. Invoke the job now, on the calling thread, with
+  // nullptr -- dropping it would leave whatever is waiting on it pending
+  // forever. Deliberately outside the lock: the job settles a promise, and a
+  // promise continuation can run arbitrary code.
+  job(nullptr);
+}
+
 void DocumentExecutor::shutdown() noexcept {
   std::deque<Job> abandoned;
   {

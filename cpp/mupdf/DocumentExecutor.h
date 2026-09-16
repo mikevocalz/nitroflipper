@@ -53,6 +53,19 @@ class DocumentExecutor : public std::enable_shared_from_this<DocumentExecutor> {
   std::future<R> submit(std::function<R(MuPDFDocument&)> work);
 
   /**
+   * Queue `job` and let it settle its own result.
+   *
+   * `job` is invoked exactly once on the worker thread: with a pointer to the
+   * document, or with nullptr if the executor shut down before it ran.
+   *
+   * This is the form the Nitro layer uses. A promise-returning bridge built on
+   * submit() would have to block a second thread waiting on the future; here
+   * the job resolves the JS promise directly from the worker, so an operation
+   * is one hop with no extra thread.
+   */
+  void enqueue(std::function<void(MuPDFDocument*)> job);
+
+  /**
    * Stop accepting work, abandon what is queued, and join the thread.
    *
    * Queued jobs are settled with Cancelled. The job already running is allowed

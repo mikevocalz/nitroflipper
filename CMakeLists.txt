@@ -58,6 +58,45 @@ if(NITROFLIPPER_WITH_MUPDF)
   target_link_libraries(mupdfdocument PUBLIC mupdf)
   target_compile_features(mupdfdocument PUBLIC cxx_std_20)
 
+  # The Nitro HybridObjects. Compiled here only to prove they build against the
+  # generated specs; the app builds them through Nitrogen's autolinking, which
+  # supplies react-native-nitro-modules' own headers and sources.
+  # The generated specs include <NitroModules/Promise.hpp>. CocoaPods provides
+  # that prefix through public_header_files and Android through prefab; neither
+  # exists in a plain CMake build, so stage the same mapping here by copying the
+  # headers into a NitroModules/ directory. This is only for the compile check
+  # -- the app build gets the prefix from Nitrogen's autolinking.
+  set(NITRO_CPP "${CMAKE_CURRENT_SOURCE_DIR}/node_modules/react-native-nitro-modules/cpp")
+  if(EXISTS "${NITRO_CPP}/core/Promise.hpp")
+    set(NITRO_SHIM "${CMAKE_CURRENT_BINARY_DIR}/nitro-include")
+    file(GLOB_RECURSE NITRO_HEADERS "${NITRO_CPP}/*.hpp" "${NITRO_CPP}/*.h")
+    file(COPY ${NITRO_HEADERS} DESTINATION "${NITRO_SHIM}/NitroModules")
+    set(NITRO_CORE_INCLUDE "${NITRO_SHIM}")
+  endif()
+
+  if(NITRO_CORE_INCLUDE)
+    add_library(mupdfnitro OBJECT
+      cpp/HybridMuPDFFactory.cpp
+      cpp/HybridMuPDFDocument.cpp
+      cpp/HybridRenderedPage.cpp
+    )
+    target_include_directories(mupdfnitro PRIVATE
+      cpp
+      cpp/mupdf
+      nitrogen/generated/shared/c++
+      "${NITRO_CORE_INCLUDE}"
+      # Nitro's JSIConverter includes <jsi/jsi.h>, which lives in React Native
+      # rather than in Nitro itself.
+      "${CMAKE_CURRENT_SOURCE_DIR}/node_modules/react-native/ReactCommon/jsi"
+    )
+    target_link_libraries(mupdfnitro PRIVATE mupdfdocument)
+    target_compile_features(mupdfnitro PRIVATE cxx_std_20)
+  else()
+    message(STATUS
+      "react-native-nitro-modules headers not found -- skipping the Nitro "
+      "HybridObject compile check. Run npm install to enable it.")
+  endif()
+
   add_executable(mupdfdocument_test tests/MuPDFDocument.test.cpp)
   target_link_libraries(mupdfdocument_test PRIVATE mupdfdocument Catch2::Catch2WithMain)
   target_compile_definitions(mupdfdocument_test

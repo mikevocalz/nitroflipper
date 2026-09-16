@@ -34,7 +34,10 @@ target_sources(
   ../nitrogen/generated/android/NitroFlipperOnLoad.cpp
   # Shared Nitrogen C++ sources
   ../nitrogen/generated/shared/c++/HybridComicArchiveSourceSpec.cpp
+  ../nitrogen/generated/shared/c++/HybridMuPDFDocumentSpec.cpp
+  ../nitrogen/generated/shared/c++/HybridMuPDFFactorySpec.cpp
   ../nitrogen/generated/shared/c++/HybridPageCurlSolverSpec.cpp
+  ../nitrogen/generated/shared/c++/HybridRenderedPageSpec.cpp
   # Android-specific Nitrogen C++ sources
   
 )
