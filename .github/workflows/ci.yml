@@ -1,0 +1,282 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  NODE_VERSION: '22'
+  # One ABI for the library build. Compiling MuPDF four times buys no extra
+  # signal: the sources are identical and an ABI-specific break shows up in the
+  # app's own build, which picks its ABIs from example/android/gradle.properties.
+  ANDROID_ABI: arm64-v8a
+  # android/build.gradle reads this from rootProject.ext, set in
+  # example/android/build.gradle. Keep the two in step.
+  ANDROID_NDK_VERSION: 27.1.12297006
+
+jobs:
+  # --- fast gates ------------------------------------------------------------
+  # These three finish in well under a minute and cover everything that does
+  # not need MuPDF. Nothing below is allowed to be the first thing that fails.
+
+  typecheck:
+    name: typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+
+  test-ts:
+    name: TypeScript tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+      - run: npm run test:ts
+
+  test-cpp:
+    name: C++ tests (no MuPDF)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # No npm install: the solver, archive and scaler targets are plain C++ and
+      # their fixtures are committed under fixtures/output. Catch2 arrives
+      # through FetchContent.
+      - name: Tool versions
+        run: |
+          cmake --version | head -1
+          c++ --version | head -1
+      - run: npm run test:cpp
+
+  # --- MuPDF engine ----------------------------------------------------------
+
+  test-mupdf:
+    name: MuPDF engine tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      # node_modules is needed here and not in test-cpp: the MuPDF branch of the
+      # root CMakeLists compiles the Nitro HybridObjects against
+      # react-native-nitro-modules' headers and React Native's jsi.
+      - run: npm ci
+
+      - id: pin
+        name: Read the MuPDF pin
+        run: |
+          scripts/mupdf-pin.sh all >> "$GITHUB_OUTPUT"
+
+      # Keyed on the pinned SHA256 and on both CMake files. A version bump
+      # changes the hash, so the cache cannot serve the old tarball for a new
+      # pin; a change to the source list or the font selection invalidates it
+      # too, because the fonts CMake generates with scripts/hexdump.sh at
+      # configure time are written into this same tree and saved with it.
+      - uses: actions/cache@v4
+        with:
+          path: .mupdf-cache
+          key: mupdf-${{ runner.os }}-${{ steps.pin.outputs.MUPDF_URL_SHA256 }}-${{ hashFiles('third_party/mupdf/CMakeLists.txt', 'third_party/mupdf/mupdf_sources.cmake') }}
+
+      - name: Fetch and verify MuPDF ${{ steps.pin.outputs.MUPDF_VERSION }}
+        run: |
+          TREE=$(scripts/fetch-mupdf.sh "$GITHUB_WORKSPACE/.mupdf-cache")
+          echo "MUPDF_SOURCE_DIR=$TREE" >> "$GITHUB_ENV"
+
+      # Seeding the CMake cache with MUPDF_SOURCE_DIR means the `npm run
+      # test:mupdf` below reconfigures the same directory and keeps the local
+      # tree instead of downloading its own copy into _deps.
+      - name: Seed the build directory with the cached tree
+        run: |
+          cmake -S . -B build-mupdf \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DNITROFLIPPER_WITH_MUPDF=ON \
+            -DMUPDF_SOURCE_DIR="$MUPDF_SOURCE_DIR"
+
+      - name: Engine tests
+        run: npm run test:mupdf
+
+  # --- platform builds -------------------------------------------------------
+
+  android:
+    name: Android library (assembleRelease)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+
+      # The library's android/build.gradle reads ndkVersion, compileSdkVersion
+      # and the rest from rootProject.ext, which only exists inside the example
+      # app. So the library is built through the example's Gradle root, and that
+      # needs the example's node_modules for React Native autolinking to find
+      # the library at all.
+      - run: npm ci
+      - run: npm ci --prefix example
+
+      - name: Install NDK ${{ env.ANDROID_NDK_VERSION }}
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "ndk;$ANDROID_NDK_VERSION" "cmake;3.22.1"
+
+      # Not cached: MuPDF arrives through FetchContent inside the AGP build,
+      # which writes it under android/.cxx. That directory is gigabytes on a
+      # real build, which is past what a GitHub cache entry is worth. The 66MB
+      # download is the cheap part; the compile is not cached either. See
+      # docs/ci.md for the one change to android/build.gradle that would let
+      # this job share the cache the test-mupdf job uses.
+      - name: assembleRelease
+        run: |
+          cd example/android
+          ./gradlew :nitro-flipper:assembleRelease \
+            -PreactNativeArchitectures="$ANDROID_ABI" \
+            --no-daemon --stacktrace
+
+      - name: Check the AAR
+        run: scripts/check-android-aar.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nitro-flipper-release-aar
+          path: android/build/outputs/aar/nitro-flipper-release.aar
+          if-no-files-found: error
+
+  ios:
+    name: iOS (xcframework + pod install)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: example
+
+      - run: npm ci
+      - run: npm ci --prefix example
+
+      - id: pin
+        run: scripts/mupdf-pin.sh all >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: .mupdf-cache
+          key: mupdf-${{ runner.os }}-${{ steps.pin.outputs.MUPDF_URL_SHA256 }}-${{ hashFiles('third_party/mupdf/CMakeLists.txt', 'third_party/mupdf/mupdf_sources.cmake') }}
+
+      - name: Fetch and verify MuPDF ${{ steps.pin.outputs.MUPDF_VERSION }}
+        run: |
+          TREE=$(scripts/fetch-mupdf.sh "$GITHUB_WORKSPACE/.mupdf-cache")
+          echo "MUPDF_SOURCE_DIR=$TREE" >> "$GITHUB_ENV"
+
+      # Two full MuPDF compiles, device and simulator. scripts/build-mupdf-apple.sh
+      # reads MUPDF_SOURCE_DIR out of the environment and forwards it to CMake,
+      # so this uses the cached tree and its already-generated fonts.
+      - name: Build mupdf.xcframework
+        run: scripts/build-mupdf-apple.sh
+
+      - name: Check both slices
+        run: |
+          XCF=ios/generated/mupdf.xcframework
+          test -d "$XCF/ios-arm64" || { echo "missing device slice" >&2; exit 1; }
+          test -d "$XCF"/ios-arm64_x86_64-simulator || { echo "missing simulator slice" >&2; exit 1; }
+          for lib in "$XCF"/*/libmupdf-combined.a; do
+            echo "== $lib"
+            lipo -info "$lib"
+          done
+
+      # First run of this step in CI is a genuine unknown: no `pod install` has
+      # ever been run against this podspec. It is here rather than behind
+      # continue-on-error because that is the point of putting it in CI.
+      - name: pod install
+        run: |
+          cd example/ios
+          bundle exec pod install
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: example-podfile-lock
+          path: example/ios/Podfile.lock
+          if-no-files-found: error
+
+  # --- packaging -------------------------------------------------------------
+
+  pack:
+    name: npm pack + clean-consumer check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+      - run: npm ci
+
+      # Packs, extracts, and checks that every path the Android CMake, the
+      # Gradle file, the podspec and react-native.config.js reach for survived
+      # the trip -- and that no local build output came along.
+      - name: Verify the tarball
+        run: scripts/verify-pack.sh "$RUNNER_TEMP/pack"
+
+      - id: pin
+        run: scripts/mupdf-pin.sh all >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: .mupdf-cache
+          key: mupdf-${{ runner.os }}-${{ steps.pin.outputs.MUPDF_URL_SHA256 }}-${{ hashFiles('third_party/mupdf/CMakeLists.txt', 'third_party/mupdf/mupdf_sources.cmake') }}
+
+      - name: Fetch and verify MuPDF ${{ steps.pin.outputs.MUPDF_VERSION }}
+        run: |
+          TREE=$(scripts/fetch-mupdf.sh "$GITHUB_WORKSPACE/.mupdf-cache")
+          echo "MUPDF_SOURCE_DIR=$TREE" >> "$GITHUB_ENV"
+
+      # Configure MuPDF out of the extracted tarball rather than the repo. This
+      # is the check that the shipped third_party/mupdf is self-sufficient: it
+      # resolves mupdf_sources.cmake next to itself, finds the pre-generated urw
+      # fonts, and generates the rest.
+      - name: Configure MuPDF from the extracted tarball
+        run: |
+          PKG="$RUNNER_TEMP/pack/extracted/package"
+          cmake -S "$PKG/third_party/mupdf" -B "$RUNNER_TEMP/pkg-mupdf" \
+            -DMUPDF_SOURCE_DIR="$MUPDF_SOURCE_DIR" \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nitro-flipper-tarball
+          path: ${{ runner.temp }}/pack/*.tgz
+          if-no-files-found: error
