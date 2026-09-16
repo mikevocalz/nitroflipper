@@ -26,6 +26,12 @@ interface ReaderState {
   errorKind: string | null;
   /** Non-fatal message over a working reader. See setNotice. */
   notice: string | null;
+  /**
+   * The pages actually on the canvas, which lag `pageIndex` by the frames a
+   * turn takes to publish. Chrome reads this so the page counter never gets
+   * ahead of the page.
+   */
+  visiblePages: readonly number[];
   size: Size;
   pageIndex: number;
   /** Reader chrome hides so the art owns the panel; tapping brings it back. */
@@ -66,6 +72,7 @@ interface ReaderState {
    * it -- the other 600 pages still work.
    */
   setNotice: (notice: string | null) => void;
+  setVisiblePages: (pages: readonly number[]) => void;
   setSize: (size: Size) => void;
   setPageIndex: (pageIndex: number) => void;
   toggleChrome: () => void;
@@ -86,6 +93,7 @@ export const useReaderStore = create<ReaderState>()((set) => ({
   error: null,
   errorKind: null,
   notice: null,
+  visiblePages: [],
   size: { width: 0, height: 0 },
   pageIndex: 0,
   chromeVisible: true,
@@ -104,6 +112,7 @@ export const useReaderStore = create<ReaderState>()((set) => ({
   setError: (error, kind) => set({ error, errorKind: kind ?? null }),
   clearError: () => set({ error: null, errorKind: null }),
   setNotice: (notice) => set({ notice }),
+  setVisiblePages: (visiblePages) => set({ visiblePages }),
   setSize: (size) => set({ size }),
   setPageIndex: (pageIndex) => set({ pageIndex }),
   toggleChrome: () => set((s) => ({ chromeVisible: !s.chromeVisible })),

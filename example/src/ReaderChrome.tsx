@@ -18,6 +18,10 @@ import { HIT_SLOP_MIN, RADIUS, SPACE, TYPE } from './theme';
 export function ReaderChrome() {
   const source = useReaderStore((s) => s.source);
   const pageIndex = useReaderStore((s) => s.pageIndex);
+  // What is drawn, not what was requested: the counter must not tick over
+  // while the previous page is still on the canvas.
+  const visiblePages = useReaderStore((s) => s.visiblePages);
+  const shownIndex = visiblePages[0] ?? pageIndex;
   const requestTurn = useReaderStore((s) => s.requestTurn);
   const visible = useReaderStore((s) => s.chromeVisible);
   const toggleChrome = useReaderStore((s) => s.toggleChrome);
@@ -34,9 +38,9 @@ export function ReaderChrome() {
   // from the flip around wide pages, and the buttons then move by a different
   // amount than a swipe does.
   const label =
-    spread && pageIndex + 1 < count
-      ? STRINGS.reader.spreadOf(pageIndex + 1, pageIndex + 2, count)
-      : STRINGS.reader.pageOf(pageIndex + 1, count);
+    visiblePages.length > 1
+      ? STRINGS.reader.spreadOf(shownIndex + 1, shownIndex + 2, count)
+      : STRINGS.reader.pageOf(shownIndex + 1, count);
 
   const canBack = pageIndex - step >= 0;
   const canNext = pageIndex + step < count;

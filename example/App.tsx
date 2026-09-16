@@ -2,6 +2,7 @@ import React, { useEffect } from 'react';
 import {
   ActivityIndicator,
   Image,
+  Platform,
   StatusBar,
   StyleSheet,
   Text,
@@ -21,7 +22,10 @@ import {
 
 import ltrAsset from './src/assets/MMPR1.cbz';
 import pdfAsset from './src/assets/comic.pdf';
-import epubAsset from './src/assets/comic.epub';
+// Named apart from comic.pdf on purpose: Android flattens a bundled asset to
+// its basename as a raw resource, so comic.pdf and comic.epub both become
+// `raw/src_assets_comic` and the release build fails on duplicate resources.
+import epubAsset from './src/assets/book.epub';
 import { useReaderStore } from './src/readerStore';
 import { ReaderChrome } from './src/ReaderChrome';
 import { ContentsPanel } from './src/panels/ContentsPanel';
@@ -38,20 +42,38 @@ import { AppearancePanel } from './src/panels/AppearancePanel';
  */
 const FORMAT: 'cbz' | 'pdf' | 'epub' = 'cbz';
 
+/**
+ * The app's package, read off its own sandbox path (/data/user/0/<pkg>/cache).
+ * Only needed to address bundled raw resources in a release build.
+ */
+const packageName =
+  RNBlobUtil.fs.dirs.CacheDir.split('/').filter(Boolean)[3] ?? '';
+
 const FIXTURES = {
   cbz: { asset: ltrAsset, name: 'sample.cbz' },
   pdf: { asset: pdfAsset, name: 'sample.pdf' },
   epub: { asset: epubAsset, name: 'sample.epub' },
 } as const;
 
-/** Copy a bundled asset to a real path, since the engines open files. */
+/**
+ * Copy a bundled asset to a real path, since the engines open files.
+ *
+ * The asset's URI is only an http URL while Metro is serving it. In a release
+ * build Android has flattened it into a raw resource and `resolveAssetSource`
+ * returns a bare resource name with no scheme, which the fetch turns into
+ * "url == nullnull" -- the release app opened to a red error string and no
+ * book. A name with no scheme is a resource, so address it as one.
+ */
 async function materialise(asset: number, name: string): Promise<string> {
   const resolved = Image.resolveAssetSource(asset);
+  const uri = /^[a-z][a-z0-9+.-]*:/i.test(resolved.uri ?? '')
+    ? resolved.uri
+    : Platform.select({
+        android: `android.resource://${packageName}/raw/${resolved.uri}`,
+        default: resolved.uri,
+      });
   const cachePath = `${RNBlobUtil.fs.dirs.CacheDir}/${name}`;
-  const res = await RNBlobUtil.config({ fileCache: true }).fetch(
-    'GET',
-    resolved.uri,
-  );
+  const res = await RNBlobUtil.config({ fileCache: true }).fetch('GET', uri);
   const downloaded = res.path();
   if (!downloaded) {
     throw new Error(`Failed to download ${name}`);
@@ -121,6 +143,29 @@ function ActivePanel() {
   }
 }
 
+/**
+ * Non-fatal message over a working reader. Clears itself, because a page that
+ * failed once is usually fine on the next pass and a stuck banner is worse
+ * than the miss it reports.
+ */
+function Notice() {
+  const notice = useReaderStore((s) => s.notice);
+  const setNotice = useReaderStore((s) => s.setNotice);
+  useEffect(() => {
+    if (notice === null) return;
+    const id = setTimeout(() => setNotice(null), 4000);
+    return () => clearTimeout(id);
+  }, [notice, setNotice]);
+  if (notice === null) return null;
+  return (
+    <View style={styles.notice} pointerEvents="none">
+      <Text style={styles.noticeText} numberOfLines={2}>
+        {notice}
+      </Text>
+    </View>
+  );
+}
+
 export default function App(): React.JSX.Element {
   const isDarkMode = useColorScheme() === 'dark';
   // Measure the container instead of the window: the reader fills whatever
@@ -160,6 +205,7 @@ export default function App(): React.JSX.Element {
             gutter={0}
             onLayoutChange={useReaderStore.getState().setLayout}
             turnRequest={turnRequest}
+            onSpreadVisible={useReaderStore.getState().setVisiblePages}
             // A page that will not render is NOT a fatal document error.
             // Routing it into `error` unmounted the reader and replaced the
             // whole book with a red string the reader could not get out of.
@@ -171,6 +217,7 @@ export default function App(): React.JSX.Element {
         )}
         {source && <ReaderChrome />}
         {source && <ActivePanel />}
+        {source && <Notice />}
       </View>
     </GestureHandlerRootView>
   );
@@ -193,6 +240,21 @@ const styles = StyleSheet.create({
   label: {
     marginTop: 12,
     color: '#fff',
+  },
+  notice: {
+    position: 'absolute',
+    left: 24,
+    right: 24,
+    bottom: 96,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    backgroundColor: 'rgba(0,0,0,0.78)',
+  },
+  noticeText: {
+    color: '#fff',
+    fontSize: 13,
+    textAlign: 'center',
   },
   error: {
     color: '#ff6b6b',
