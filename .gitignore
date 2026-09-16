@@ -10,3 +10,4 @@ android/build
 .gradle
 .cxx
 *.cbz
+build-mupdf/
