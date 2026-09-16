@@ -11,3 +11,8 @@ android/build
 .cxx
 *.cbz
 build-mupdf/
+
+# MuPDF Apple build output. Tens of megabytes, rebuilt by
+# scripts/build-mupdf-apple.sh at pod install time.
+ios/generated/
+build/

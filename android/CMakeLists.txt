@@ -12,7 +12,8 @@ add_library(
 include(${CMAKE_SOURCE_DIR}/../nitrogen/generated/android/NitroFlipper+autolinking.cmake)
 
 target_sources(
-  NitroFlipper PRIVATE
+  NitroFlipper
+  PRIVATE
   ../cpp/PageCurlSolver.cpp
   ../cpp/HybridPageCurlSolver.cpp
   ../cpp/ComicArchive.cpp
@@ -22,8 +23,38 @@ target_sources(
 )
 
 target_include_directories(
-  NitroFlipper PRIVATE
+  NitroFlipper
+  PRIVATE
   ../cpp
   ../cpp/vendor/miniz
   ../cpp/vendor/stb
 )
+
+# --- MuPDF document engine (PDF + EPUB) --------------------------------------
+#
+# On by default. Turning it off drops PDF and EPUB and leaves CBZ working, for
+# anyone who wants the smaller binary or does not want the AGPL obligation --
+# see docs/licensing.md, which is required reading before shipping this.
+#
+# Cost when on, measured for arm64-v8a: about 15MB added to the stripped .so
+# and roughly 40s of first build. Gradle caches it after that.
+option(NITROFLIPPER_WITH_MUPDF "Build the MuPDF-backed PDF/EPUB engine" ON)
+
+if(NITROFLIPPER_WITH_MUPDF)
+  add_subdirectory(${CMAKE_SOURCE_DIR}/../third_party/mupdf mupdf-build)
+
+  target_sources(
+    NitroFlipper
+    PRIVATE
+    ../cpp/mupdf/FzGuard.cpp
+    ../cpp/mupdf/MuPDFDocument.cpp
+    ../cpp/mupdf/DocumentExecutor.cpp
+    ../cpp/HybridMuPDFFactory.cpp
+    ../cpp/HybridMuPDFDocument.cpp
+    ../cpp/HybridRenderedPage.cpp
+  )
+
+  target_include_directories(NitroFlipper PRIVATE ../cpp/mupdf)
+  target_link_libraries(NitroFlipper mupdf)
+  target_compile_definitions(NitroFlipper PRIVATE NITROFLIPPER_WITH_MUPDF=1)
+endif()
