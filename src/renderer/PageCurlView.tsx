@@ -107,6 +107,10 @@ export function PageCurlView({
 }: PageCurlViewProps) {
   const effect = useMemo(() => Skia.RuntimeEffect.Make(PAGE_CURL_SKSL), []);
   const progress = useSharedValue(0);
+  // Frames the reader can land on without waiting for React. See stageLanding.
+  const landingAhead = useSharedValue<CurlFrame | null>(null);
+  const landingBehind = useSharedValue<CurlFrame | null>(null);
+  const consumed = useRef(new Set<number>());
   const dir = useSharedValue(1);
   const turning = useSharedValue(true);
   const dragging = useSharedValue(false);
@@ -174,7 +178,11 @@ export function PageCurlView({
     }, [recorded],
   );
 
-  const commit = useCallback((generation: number, target: number, forward: boolean) => {
+  const commit = useCallback((generation: number, target: number, forward: boolean,
+    landed: number) => {
+    // A landing that is now on screen must not be discarded when this load is
+    // superseded -- the frame drawing it owns those shaders.
+    if (landed !== 0) consumed.current.add(landed);
     if (generation !== epoch.current) return;
     travel.current = forward ? 1 : -1;
     callbacks.current.onPageIndexChange?.(target);
@@ -183,6 +191,7 @@ export function PageCurlView({
   useEffect(() => {
     const generation = ++epoch.current;
     let cancelled = false;
+    const staged: number[] = [];
     const retained = new Map<number, { key: PageKey; image: SkImage }>();
     const here: SpreadGroup = { start: plan.pages[0], size: plan.step };
     let nextReady = false;
@@ -198,8 +207,15 @@ export function PageCurlView({
     const cancelLoad = () => {
       cancelled = true;
       if (epoch.current === generation) epoch.current += 1;
+      for (const revision of staged) {
+        // A landing the reader never took still owns shaders and cache holds.
+        if (!consumed.current.has(revision)) lifetime.discard(revision);
+        consumed.current.delete(revision);
+      }
       scheduleOnUI(() => {
         'worklet';
+        landingAhead.value = null;
+        landingBehind.value = null;
         if (requested.value !== generation) return;
         requested.value = 0;
         cancelAnimation(progress);
@@ -276,8 +292,11 @@ export function PageCurlView({
     const isCached = (group: SpreadGroup | null) =>
       group !== null && pagesOf(group).every((index) => cached(index) !== null);
 
-    const publish = (reset: boolean) => {
-      if (cancelled) return;
+    const frameFor = (
+      base: SpreadGroup,
+      ahead: SpreadGroup | null,
+      behind: SpreadGroup | null,
+    ): CurlFrame => {
       const children: SkShader[] = [];
       const keys: PageKey[] = [];
       try {
@@ -287,8 +306,7 @@ export function PageCurlView({
           keys.push(entry.key);
           images.set(index, entry.image);
         }
-        for (const group of [here, nextReady ? plan.next : null,
-          previousReady ? plan.previous : null]) {
+        for (const group of [base, ahead, behind]) {
           children.push(...groupShaders(source, group, images, width, height, gutter));
         }
       } catch (error) {
@@ -300,13 +318,21 @@ export function PageCurlView({
         for (const shader of children) shader.dispose();
         for (const key of keys) cache.release(key);
       });
-      const current: CurlFrame = {
-        revision, generation, width, height, rtl, children, pages: pagesOf(here),
-        forwardWidth: placement(here.start + here.size - 1).width,
-        backwardWidth: placement(here.start).width,
-        next: nextReady ? plan.next?.start ?? null : null,
-        previous: previousReady ? plan.previous?.start ?? null : null,
+      return {
+        revision, generation, width, height, rtl, children, pages: pagesOf(base),
+        forwardWidth: placement(base.start + base.size - 1).width,
+        backwardWidth: placement(base.start).width,
+        next: ahead?.start ?? null,
+        previous: behind?.start ?? null,
       };
+    };
+
+    const install = (current: CurlFrame, reset: boolean) => {
+      const revision = current.revision;
+      if (cancelled) {
+        lifetime.discard(revision);
+        return;
+      }
       scheduleOnUI(() => {
         'worklet';
         if (requested.value !== generation) {
@@ -323,6 +349,45 @@ export function PageCurlView({
       });
     };
 
+    /**
+     * The frame the reader lands on, built before the turn commits.
+     *
+     * Committing used to hand the turn back to React: set the page index,
+     * re-render, re-run this effect, rebuild six shaders, publish. Measured on
+     * a Surface Duo that is 64ms in which the panel presents nothing while the
+     * page sits fully curled -- the one long gap in every turn. The landing
+     * frame is ready before the finger lets go, so the commit is a single
+     * assignment on the UI thread and React only has to catch up afterwards.
+     */
+    const stageLanding = (forward: boolean) => {
+      if (cancelled) return;
+      const group = forward ? plan.next : plan.previous;
+      if (group === null || !isCached(group)) return;
+      const onward = planSpreadAt(groups, group.start);
+      const ahead = forward ? onward.next : here;
+      const behind = forward ? here : onward.previous;
+      const ready = (candidate: SpreadGroup | null) =>
+        candidate === null ? null : isCached(candidate) ? candidate : null;
+      let landing: CurlFrame;
+      try {
+        landing = frameFor(group, ready(ahead), ready(behind));
+      } catch {
+        // A page went out of the cache between the check and the build; the
+        // turn still works, it just goes the slow way through React.
+        return;
+      }
+      staged.push(landing.revision);
+      scheduleOnUI(() => {
+        'worklet';
+        if (requested.value !== generation) {
+          scheduleOnRN(discard, landing.revision);
+          return;
+        }
+        if (forward) landingAhead.value = landing;
+        else landingBehind.value = landing;
+      });
+    };
+
     void (async () => {
       if (!effect) throw new Error('Could not compile the page curl shader');
       await loadGroup(here);
@@ -331,7 +396,10 @@ export function PageCurlView({
       // current-page placeholders while decoding an unrelated neighbour.
       nextReady = isCached(plan.next);
       previousReady = isCached(plan.previous);
-      publish(true);
+      install(frameFor(here, nextReady ? plan.next : null,
+        previousReady ? plan.previous : null), true);
+      stageLanding(travel.current >= 0);
+      stageLanding(travel.current < 0);
       const directions = travel.current >= 0 ? [true, false] : [false, true];
       for (const forward of directions) {
         if (cancelled) return;
@@ -342,7 +410,9 @@ export function PageCurlView({
           if (cancelled) return;
           if (forward) nextReady = true;
           else previousReady = true;
-          publish(false);
+          install(frameFor(here, nextReady ? plan.next : null,
+            previousReady ? plan.previous : null), false);
+          stageLanding(forward);
         } catch (error) {
           if (!cancelled) callbacks.current.onPageLoadError?.(error);
         }
@@ -394,12 +464,36 @@ export function PageCurlView({
       progress.value = 0;
       turning.value = true;
       progress.value = withTiming(1, { duration: 320 }, (finished) => {
-        if (finished) scheduleOnRN(commit, current.generation, target, forward);
+        if (finished) {
+          scheduleOnRN(commit, current.generation, target, forward,
+            land(forward, target));
+        }
       });
     });
     // Each request is consumed once; readiness changes must not replay a tap.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestId]);
+
+  /**
+   * Show the pre-built landing frame, if the reader is turning to it.
+   *
+   * Returns the revision taken, so the load that staged it knows not to throw
+   * it away. Zero means there was none and the turn goes the slow way: React
+   * re-renders, the loader rebuilds the shaders, and the panel shows the same
+   * fully-curled page until it lands.
+   */
+  const land = (forward: boolean, target: number) => {
+    'worklet';
+    const landing = forward ? landingAhead.value : landingBehind.value;
+    landingAhead.value = null;
+    landingBehind.value = null;
+    if (!landing || landing.pages[0] !== target) return 0;
+    frame.value = landing;
+    progress.value = 0;
+    turning.value = false;
+    dragging.value = false;
+    return landing.revision;
+  };
 
   const pan = Gesture.Pan().activeOffsetX([-8, 8]).failOffsetY([-24, 24])
     .onStart((event) => {
@@ -441,7 +535,8 @@ export function PageCurlView({
       }, (finished) => {
         if (!finished) return;
         if (shouldCommit && target !== null) {
-          scheduleOnRN(commit, current.generation, target, forward);
+          scheduleOnRN(commit, current.generation, target, forward,
+            land(forward, target));
         } else turning.value = false;
       });
     })
