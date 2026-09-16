@@ -139,6 +139,16 @@ function nextFrames(count: number): Promise<void> {
 const FLICK_VELOCITY = 400;
 /** Past this fraction of the page, a released drag falls open. */
 const COMMIT_AT = 0.5;
+/**
+ * Ceiling on the speed a release hands the animation, in pages per second.
+ *
+ * Carrying the finger's speed keeps the motion continuous, but a hard flick
+ * measures thousands of pixels a second: the spring then covers what is left
+ * of the page inside a single frame and the turn reads as a snap rather than a
+ * page falling. A page still turns in about a third of a second at this
+ * ceiling, which is roughly what paper does.
+ */
+const MAX_RELEASE_SPEED = 3;
 
 export function PageCurlView({
   source,
@@ -536,6 +546,9 @@ export function PageCurlView({
   };
   const sheetRect = { x: 0, y: 0, width: sheetW, height: sheetH };
 
+  // How far the finger must travel to turn the leaf all the way over.
+  const leafWidth = leafFit.w;
+
   // -1 while turning back, so the same curl runs mirrored about the spine.
   const dir = useSharedValue(1);
   // True from the moment a turn commits until its pages are on screen, so a
@@ -599,7 +612,11 @@ export function PageCurlView({
         : rtl
           ? -event.translationX
           : event.translationX;
-      progress.value = Math.min(Math.max(travel / (sheetW / 2), 0), 1);
+      // Across the leaf being turned, not half the sheet. Two pages side by
+      // side make those the same distance, but a single page shown alone IS
+      // the sheet, and dividing it in half turned the page in half the finger
+      // travel -- the curl ran away from the finger on one screen.
+      progress.value = Math.min(Math.max(travel / leafWidth, 0), 1);
     })
     .onEnd((event) => {
       'worklet';
@@ -622,7 +639,7 @@ export function PageCurlView({
       // the other extreme it crawls when the page is already nearly over.
       // Velocity is in pixels/s; the curl is in progress units, where 1 is
       // half the sheet.
-      const velocity = away / (sheetW / 2);
+      const velocity = Math.min(away / leafWidth, MAX_RELEASE_SPEED);
       if (commit) {
         turning.value = true;
         // Clamped to the direction it is going. A drag dragged past the
@@ -645,7 +662,7 @@ export function PageCurlView({
         );
       } else {
         progress.value = withSpring(0, {
-          velocity: Math.min(velocity, 0),
+          velocity: Math.max(Math.min(velocity, 0), -MAX_RELEASE_SPEED),
           damping: 22,
           stiffness: 200,
           overshootClamping: true,

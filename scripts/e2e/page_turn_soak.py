@@ -18,6 +18,7 @@ did-anything-render check, not a pixel diff.
 from __future__ import annotations
 
 import argparse
+import re
 import io
 import json
 import statistics
@@ -35,6 +36,26 @@ BLANK_STDDEV = 6.0
 SETTLE_BUDGET_MS = 1200
 # Frames this close are the same frame, so the turn has landed.
 STABLE_DIFF = 1.5
+
+
+def window_frame(serial: str, package: str) -> tuple[int, int]:
+    """
+    The app window's size, not the display's.
+
+    `wm size` reports the panel -- on a dual-screen it keeps saying 2700x1800
+    while the app is folded onto one screen at 1350x1800, and a swipe computed
+    from that starts outside the window and never reaches the reader.
+    """
+    out = adb(serial, "shell", "dumpsys", "window", "windows")
+    block = out.split(package)
+    for chunk in block[1:]:
+        found = re.search(r"frame=\[(\d+),(\d+)\]\[(\d+),(\d+)\]", chunk)
+        if found:
+            x0, y0, x1, y1 = (int(v) for v in found.groups())
+            if x1 > x0 and y1 > y0:
+                return x1 - x0, y1 - y0
+    size = adb(serial, "shell", "wm", "size").strip().splitlines()[-1]
+    return tuple(int(v) for v in size.split(":")[-1].strip().split("x"))  # type: ignore[return-value]
 
 
 def adb(serial: str, *args: str, binary: bool = False):
@@ -168,8 +189,7 @@ def run(args) -> int:
     serial, package = args.serial, args.package
     if not args.no_relaunch:
         relaunch(serial, package, args.activity)
-    size = adb(serial, "shell", "wm", "size").strip().split(":")[-1].strip()
-    width, height = (int(v) for v in size.split("x"))
+    width, height = window_frame(serial, package)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -202,15 +222,7 @@ def run(args) -> int:
             print(f"--- folding to {args.fold_size} ---", flush=True)
             folded = True
             set_display(serial, args.fold_size)
-            width, height = (
-                int(v)
-                for v in adb(serial, "shell", "wm", "size")
-                .strip()
-                .splitlines()[-1]
-                .split(":")[-1]
-                .strip()
-                .split("x")
-            )
+            width, height = window_frame(serial, package)
             frame, _ = settle(serial)
             left_sd, right_sd = spread_of(frame)
             folded_blank = left_sd < BLANK_STDDEV and right_sd < BLANK_STDDEV

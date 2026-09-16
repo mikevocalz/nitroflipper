@@ -13,12 +13,33 @@ running at the panel's rate.
 from __future__ import annotations
 
 import argparse
+import re
 import statistics
 import subprocess
 import sys
 import time
 
 VSYNC_SLACK = 1.4  # a gap longer than this many vsyncs is a dropped frame
+
+
+def window_frame(serial: str, package: str) -> tuple[int, int]:
+    """
+    The app window's size, not the display's.
+
+    `wm size` reports the panel -- on a dual-screen it keeps saying 2700x1800
+    while the app is folded onto one screen at 1350x1800, and a swipe computed
+    from that starts outside the window and never reaches the reader.
+    """
+    out = adb(serial, "shell", "dumpsys", "window", "windows")
+    block = out.split(package)
+    for chunk in block[1:]:
+        found = re.search(r"frame=\[(\d+),(\d+)\]\[(\d+),(\d+)\]", chunk)
+        if found:
+            x0, y0, x1, y1 = (int(v) for v in found.groups())
+            if x1 > x0 and y1 > y0:
+                return x1 - x0, y1 - y0
+    size = adb(serial, "shell", "wm", "size").strip().splitlines()[-1]
+    return tuple(int(v) for v in size.split(":")[-1].strip().split("x"))  # type: ignore[return-value]
 
 
 def adb(serial: str, *args: str) -> str:
@@ -62,10 +83,7 @@ def present_times(serial: str, layer: str) -> tuple[float, list[int]]:
 
 def run(args) -> int:
     layer = surface_layer(args.serial, args.package)
-    width, height = (
-        int(v)
-        for v in adb(args.serial, "shell", "wm", "size").split(":")[-1].strip().split("x")
-    )
+    width, height = window_frame(args.serial, args.package)
     present_times(args.serial, layer)  # drain whatever came before
 
     for _ in range(args.turns):
