@@ -71,8 +71,8 @@ interface PageCurlViewProps {
   /**
    * Called once the UI runtime has built the replacement page's native paint.
    * Use this for page labels instead of the earlier requested index. This is
-   * a submission acknowledgement; the independently composited SurfaceView
-   * does not provide a presentation fence for React chrome.
+   * a submission acknowledgement; the canvas is composited on its own thread
+   * and gives React chrome no presentation fence to wait on.
    */
   onSpreadVisible?: (pages: readonly number[]) => void;
   /**
@@ -990,7 +990,23 @@ export function PageCurlView({
   return (
     <View style={{ width, height }}>
       <GestureDetector gesture={gesture}>
-        <Canvas style={{ width, height }} opaque>
+        {/*
+          * Not `opaque`. That prop picks the Android view underneath: opaque is
+          * a SurfaceView, which owns a compositor layer of its own, and a
+          * full-screen one of those costs the compositor enough per frame that
+          * every frame of a turn lands a vsync late and the whole animation
+          * halves to 30fps. Non-opaque is a TextureView, which HWUI draws as an
+          * ordinary quad inside the app's own window, and the same turn holds
+          * 60. The surface carries an alpha channel it does not need, but the
+          * Fill below paints every pixel anyway, so nothing shows through.
+          *
+          * Measured on a 2700x1800 Surface Duo: presented frame interval p50
+          * 33.2ms as a SurfaceView, 16.7ms as a TextureView, at identical
+          * resolution and with pixel-identical output. Shading fewer pixels
+          * does not fix it -- that was measured too, and only looked like a fix
+          * because compositing a smaller SurfaceView costs the compositor less.
+          */}
+        <Canvas style={{ width, height }}>
           <Fill color={PAGE_BACKGROUND} />
           <Fill paint={paint} />
         </Canvas>
