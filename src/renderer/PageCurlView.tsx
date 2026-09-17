@@ -243,13 +243,25 @@ export function PageCurlView({
   // independent native references to all six children BEFORE an older frame's
   // wrappers can be released. Skia consumes one animated paint, so it cannot
   // observe new textures with the previous progress (or the reverse).
+  // Two paints, used alternately, rather than one per frame or one reused.
+  //
+  // Reanimated drops a write whose value is identical to the last one, and
+  // `paint` is the only shared value in the Skia tree, so a single reused paint
+  // would never mark Skia's container mapper dirty and the canvas would freeze
+  // on frame one. Alternating means the value is never equal to the previous
+  // one, so the write always lands -- and allocating a native paint per frame
+  // (a host object, a setPrototypeOf call out to JS, and garbage for Hermes to
+  // collect mid-animation) stops entirely. Handing the same paint back every
+  // other frame is safe because the recorder copies it by value when it records
+  // the frame, so the copy this frame's picture holds is not the object the
+  // frame after next writes into.
+  const pool = useMemo(() => ({ paints: [Skia.Paint(), Skia.Paint()], at: 0 }), []);
   const rendered = useDerivedValue(() => {
     const current = frame.value;
-    // A fresh paint every frame is load-bearing, not waste: `paint` is the only
-    // shared value in the Skia tree, and Reanimated drops a write whose value is
-    // identical to the last one, so a pooled instance would never mark Skia's
-    // container mapper dirty and the canvas would freeze on frame one.
-    const paint = Skia.Paint();
+    pool.at = pool.at === 0 ? 1 : 0;
+    const paint = pool.paints[pool.at];
+    // Reused, so it carries the last turn's shader until this frame sets one.
+    paint.setShader(null);
     let shaded = false;
     if (current && effect) {
       // Which leaf is hinged, and where. A spread hinges down the middle; a
