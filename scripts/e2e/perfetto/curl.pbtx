@@ -8,6 +8,14 @@
 # android.surfaceflinger.frametimeline cannot see SurfaceViews. It works here
 # because the canvas is non-opaque and composites into the app window; if the
 # canvas ever goes back to `opaque`, this config stops measuring the curl.
+#
+# CAPTURE ORDER MATTERS. Start the trace first and launch the app inside the
+# window -- `am force-stop` then `am start` after tracing begins. A process that
+# was already running when tracing started reports its own Choreographer frames
+# and nothing else: no RenderThread, no DrawFrames, no eglSwapBuffers, no
+# queueBuffer, and FrameTimeline sees two frames instead of the whole run. The
+# capture looks healthy and the data-loss gate passes, so the only way to notice
+# is to check that the app has a RenderThread before trusting anything.
 
 buffers: {
   size_kb: 131072
@@ -99,6 +107,6 @@ data_sources: {
   }
 }
 
-duration_ms: 12000
+duration_ms: 30000
 flush_period_ms: 2000
 write_into_file: true
