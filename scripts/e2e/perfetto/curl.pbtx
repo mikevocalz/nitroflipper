@@ -9,6 +9,12 @@
 # because the canvas is non-opaque and composites into the app window; if the
 # canvas ever goes back to `opaque`, this config stops measuring the curl.
 #
+# Why this exists rather than `dumpsys SurfaceFlinger --latency`: that ring
+# holds about 127 entries and is not cleared by reading, so a run has to be
+# drained first and then kept short enough to fit. Ten button turns render ~192
+# frames, which silently keeps only the last 127 and reports statistics over the
+# tail. FrameTimeline here has no such cap.
+#
 # CAPTURE ORDER MATTERS. Start the trace first and launch the app inside the
 # window -- `am force-stop` then `am start` after tracing begins. A process that
 # was already running when tracing started reports its own Choreographer frames
