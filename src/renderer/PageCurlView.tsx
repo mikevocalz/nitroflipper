@@ -256,7 +256,11 @@ export function PageCurlView({
   // the frame, so the copy this frame's picture holds is not the object the
   // frame after next writes into.
   const pool = useMemo(() => ({ paints: [Skia.Paint(), Skia.Paint()], at: 0 }), []);
-  const rendered = useDerivedValue(() => {
+  // Revision of the frame the paint below was last built from, so the reader
+  // can be told what is on screen without putting another derived value
+  // between the paint and Skia.
+  const built = useSharedValue(0);
+  const paint = useDerivedValue(() => {
     const current = frame.value;
     pool.at = pool.at === 0 ? 1 : 0;
     const paint = pool.paints[pool.at];
@@ -299,15 +303,25 @@ export function PageCurlView({
     // reads. It is only visible on the two fallbacks above -- no frame yet, or a
     // disposed child -- where it still has to be the page background.
     if (!shaded) paint.setColor(Skia.Color(PAGE_BACKGROUND));
-    return { paint, revision: current?.revision ?? 0,
-      generation: current?.generation ?? 0, pages: current?.pages ?? [] };
+    // Published from inside this worklet rather than derived from its result.
+    // A second derived value reading this one puts Skia's own mapper a link
+    // further down the chain, and Reanimated needs an extra pass -- and an
+    // extra scheduled frame -- to settle it, which queues a second buffer in
+    // the same vsync. The display then shows one and drops the other, and a
+    // turn that renders 60 distinct frames a second presents about 40.
+    // A number compares equal, so an unchanged revision writes nothing.
+    built.value = current?.revision ?? 0;
+    return paint;
   });
-  const paint = useDerivedValue(() => rendered.value.paint);
   useAnimatedReaction(
-    () => rendered.value,
-    (current, previous) => {
-      if (current.revision && current.revision !== previous?.revision) {
-        scheduleOnRN(recorded, current.revision, current.generation, current.pages);
+    () => built.value,
+    (revision, previous) => {
+      if (!revision || revision === previous) return;
+      // Read the frame here rather than carrying its fields through the paint:
+      // this runs in the same mapper pass that just built it.
+      const current = frame.value;
+      if (current) {
+        scheduleOnRN(recorded, revision, current.generation, current.pages);
       }
     }, [recorded],
   );
