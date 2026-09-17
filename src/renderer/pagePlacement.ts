@@ -20,3 +20,20 @@ export function pagePlacement(
     height: h,
   };
 }
+
+/**
+ * Where the turning leaf is hinged, and how far it reaches.
+ *
+ * A spread is hinged down the middle. A single centred page is hinged on its
+ * own inner edge -- the side the turn pivots away from -- so the leaf is the
+ * page and not half of an otherwise empty viewport. `leafSign` is +1 when the
+ * leaf rests to the right of the hinge, -1 when it rests to the left.
+ *
+ * Runs on the UI runtime inside the shader's paint, and on the CPU in the
+ * shader tests, so both read the same geometry.
+ */
+export function leafHinge(width: number, leafSpan: number, spread: boolean, leafSign: number) {
+  'worklet';
+  const leafW = Math.max(leafSpan, 1);
+  return { spineX: spread ? width / 2 : (width - leafSign * leafW) / 2, leafW };
+}

@@ -15,11 +15,33 @@ export interface CurlFrame {
   width: number;
   height: number;
   rtl: boolean;
-  forwardWidth: number;
-  backwardWidth: number;
+  /**
+   * How far the turning leaf reaches from the hinge, in pixels -- the page
+   * plus its half of the gutter, not the page's own width. A turn's progress
+   * is the crease travelling that distance, so this is also what pointer
+   * movement is normalized against.
+   */
+  forwardLeaf: number;
+  backwardLeaf: number;
   next: number | null;
   previous: number | null;
+  /**
+   * Pages in each destination group, 0 when there is none. A leaf landing on a
+   * spread has its printed back on the far page; one landing on a single
+   * centred page has it on the leaf's own side, because that is where the
+   * destination is drawn.
+   */
+  nextSize: number;
+  previousSize: number;
   pages: number[];
+  /**
+   * Where each page of this group actually sits, in reading order.
+   *
+   * Magnification is scoped to one of these, so a pinch on the recto cannot
+   * move the verso. Computed with the same slot rules `groupShaders` uses, so
+   * the rect a gesture picks is the rect the page is drawn in.
+   */
+  panes: { x: number; y: number; width: number; height: number }[];
   children: SkShader[];
 }
 

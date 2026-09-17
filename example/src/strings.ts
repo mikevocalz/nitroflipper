@@ -30,6 +30,14 @@ export const STRINGS = {
     page: 'Getting the next page ready…',
   },
 
+  zoom: {
+    in: 'Zoom in',
+    out: 'Zoom out',
+    // The percentage is of the fitted page, not the document's own page size,
+    // so 100% is "the whole page on screen" rather than "actual size".
+    fitTo: (percent: number) => `Zoom ${percent} percent. Activate to fit the page.`,
+    hint: '100% is the whole page fitted to the screen',
+  },
   reader: {
     pageOf: (page: number, count: number) => `${page} of ${count}`,
     spreadOf: (left: number, right: number, count: number) =>
