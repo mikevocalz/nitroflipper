@@ -116,6 +116,27 @@ was not what kept the layer off an overlay. Reverted. Whatever the real
 disqualifier is, reading it needs the composer HAL's per-layer
 composition-change reasons, which this device does not expose.
 
+Skipping a present to drain the queue was tried too, and is also rejected.
+Reanimated drops a write equal to the previous one, so returning the previous
+paint suppresses a record and a present entirely from our own code, with no
+patch to React Native Skia. Queue depth is not readable from the UI runtime, so
+the stall was inferred from its symptom: three consecutive frames arriving more
+than a vsync-and-a-half apart, then one frame dropped. Against the same control,
+on release, eight turns, turns confirmed:
+
+| | control | frame skip |
+|---|---|---|
+| Late Present | 97.5% | 100% |
+| on_time_finish = 1 | 55.0% | 61.7% |
+| Buffer Stuffing, any | 32.5% | 61.7% |
+| SurfaceFlinger GPU Deadline Missed, any | 45.0% | 23.4% |
+
+Stuffing got worse, not better. Dropping a frame moves work off the compositor,
+which is why its GPU misses halve, but it does not return a slot: by the time
+the symptom is visible the queue is already full, and one skipped present is
+not enough to empty it while the turn keeps asking for more. A correct version
+would need the real queue depth, which no app-reachable API exposes.
+
 Note also that the release build is much worse than the debug build the
 original trace came from: 97.5% Late Present against 60.4%, and 55% finishing
 on time against 83%. The debug measurements in this document describe a build
