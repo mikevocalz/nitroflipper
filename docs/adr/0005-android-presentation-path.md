@@ -110,9 +110,23 @@ turned pages:
 | Buffer Stuffing, any | 32.5% | 42.8% |
 | SurfaceFlinger GPU Deadline Missed, any | 45.0% | 47.6% |
 
-Small, mixed in direction, and inside what forty frames can resolve. The layer
-being opaque did not stop SurfaceFlinger missing its GPU deadline, so opacity
-was not what kept the layer off an overlay. Reverted. Whatever the real
+Small, mixed in direction, and inside what forty frames can resolve.
+
+Re-run after the screen mirror was found and killed, against a control that
+differs by the same one line, it is worse rather than neutral:
+
+| | control | opaque |
+|---|---|---|
+| Late Present | 83.3% | 97.6% |
+| On-time Present | 16.7% | 2.4% |
+| SurfaceFlinger GPU Deadline Missed, any | 25.0% | 29.3% |
+| on_time_finish = 1 | 60.4% | 58.5% |
+
+Two runs, one with the mirror and one without, neither showing a benefit. The
+layer being opaque did not stop SurfaceFlinger missing its GPU deadline, so
+opacity was not what kept it off an overlay. Reverted. Single runs of about
+forty frames each, so treat the size of the gap with suspicion; the direction
+is what repeats. Whatever the real
 disqualifier is, reading it needs the composer HAL's per-layer
 composition-change reasons, which this device does not expose.
 
