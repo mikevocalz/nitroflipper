@@ -15,6 +15,16 @@
 # frames, which silently keeps only the last 127 and reports statistics over the
 # tail. FrameTimeline here has no such cap.
 #
+# CHECK FOR A SECOND OUTPUT FIRST. `adb shell dumpsys display | grep VIRTUAL`
+# must come back empty. A screen-mirroring agent leaves a virtual display
+# behind that outlives whatever started it, and SurfaceFlinger then composites
+# the whole screen twice a frame. It does not show up as app work, it shows up
+# as SurfaceFlinger missing its GPU deadline, which is the thing that stuffs
+# the buffer queue. Measured on this device: mirror present 45% of app frames
+# tagged SurfaceFlinger GPU Deadline Missed, mirror killed 25%. Kill the
+# agent's process and confirm `dumpsys SurfaceFlinger --list | grep -i mirror`
+# is empty before believing any cadence number.
+#
 # CAPTURE ORDER MATTERS. Start the trace first and launch the app inside the
 # window -- `am force-stop` then `am start` after tracing begins. A process that
 # was already running when tracing started reports its own Choreographer frames

@@ -137,6 +137,15 @@ the symptom is visible the queue is already full, and one skipped present is
 not enough to empty it while the turn keeps asking for more. A correct version
 would need the real queue depth, which no app-reachable API exposes.
 
+A second display was inflating the trigger. A screen-mirroring agent had left
+a virtual display on the device, so SurfaceFlinger was compositing the whole
+2700x1800 screen twice every frame. Killing it moved the numbers the way the
+mechanism predicts: frames tagged `SurfaceFlinger GPU Deadline Missed` fell
+from 45% to 25%, `Late Present` from 97.5% to 83.3%, and on-time presents rose
+from 2.5% to 16.7%. The stuffing mechanism described above is unchanged and
+still happens. How often it is triggered was partly an artefact of the
+measuring setup, so the figures elsewhere in this document overstate it.
+
 Note also that the release build is much worse than the debug build the
 original trace came from: 97.5% Late Present against 60.4%, and 55% finishing
 on time against 83%. The debug measurements in this document describe a build
