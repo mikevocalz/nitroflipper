@@ -30,12 +30,20 @@ if ! command -v cmake >/dev/null 2>&1; then
   exit 1
 fi
 
-# Rebuild only when an input is newer than the output. `find -newer` on the two
+# Rebuild only when an input is newer than the output. `find -newer` on the few
 # files that actually determine the build keeps this honest without a full
 # dependency graph.
+#
+# This script is one of those files. It decides what gets linked and what the
+# symbols are called, so a change here has to invalidate the output the same way
+# a change to the CMake inputs does. Leaving it out meant anyone holding an
+# xcframework built before a fix was told it was up to date and kept the old
+# one -- which is how the libjpeg symbols stayed visible after the build was
+# taught to hide them.
 if [ -d "$XCFRAMEWORK" ]; then
   NEWER=$(find "$PACKAGE_ROOT/third_party/mupdf/CMakeLists.txt" \
                "$PACKAGE_ROOT/third_party/mupdf/mupdf_sources.cmake" \
+               "${BASH_SOURCE[0]}" \
                -newer "$XCFRAMEWORK/Info.plist" 2>/dev/null | head -1 || true)
   if [ -z "$NEWER" ]; then
     echo "mupdf.xcframework is up to date"
