@@ -51,6 +51,13 @@ const FORMAT: 'cbz' | 'pdf' | 'epub' = 'cbz';
 const packageName =
   RNBlobUtil.fs.dirs.CacheDir.split('/').filter(Boolean)[3] ?? '';
 
+/**
+ * Where the iOS bundle keeps the fixtures: the asset pipeline mirrors each
+ * file's path from the project root under `assets/`, so `src/assets/MMPR1.cbz`
+ * ships as `assets/src/assets/MMPR1.cbz`. Move the imports and this moves too.
+ */
+const IOS_ASSET_DIR = 'assets/src/assets';
+
 /** Cache name -> the file Gradle packaged into the APK's assets. */
 const FIXTURES_BY_NAME: Record<string, string> = {
   'sample.cbz': 'MMPR1.cbz',
@@ -83,7 +90,14 @@ async function materialise(asset: number, name: string): Promise<string> {
   const served = /^https?:/i.test(resolved?.uri ?? '') ? resolved.uri : null;
   const uri = served ?? Platform.select({
     android: `bundle-assets://${FIXTURES_BY_NAME[name] ?? name}`,
-    default: `${RNBlobUtil.fs.dirs.MainBundleDir}/${FIXTURES_BY_NAME[name] ?? name}`,
+    // iOS keeps the file at its source path under assets/, where Gradle
+    // flattens to a basename. Checked against the built app: the fixtures sit
+    // at assets/src/assets/MMPR1.cbz and its two siblings. `bundle-assets://`
+    // cannot reach them either, because on iOS that goes through
+    // pathForResource:ofType:, which only searches the top of the bundle.
+    // MainBundleDir is the .app itself, so name the path they are actually at.
+    default: `${RNBlobUtil.fs.dirs.MainBundleDir}/${IOS_ASSET_DIR}/${
+      FIXTURES_BY_NAME[name] ?? name}`,
   });
   const cachePath = `${RNBlobUtil.fs.dirs.CacheDir}/${name}`;
   if (await RNBlobUtil.fs.exists(cachePath)) return cachePath;
