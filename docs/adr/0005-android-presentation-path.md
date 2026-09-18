@@ -81,6 +81,31 @@ The layer is GPU client-composited every frame (`RenderEngine DrawLayer`,
 overlay, which is what puts SurfaceFlinger's GPU deadline on the critical path
 in the first place.
 
+## The same code runs at 120fps on iOS
+
+Worth recording, because it rules out everything above the presentation path.
+
+An iPad Pro 12.9 (iPad8,7, iOS 26.7, 2732x2048 at 120Hz, the rate read from
+the trace rather than assumed) running the same reader, ten turns driven
+through WebDriverAgent and captured with the Animation Hitches template, over
+181 frames:
+
+| | |
+|---|---|
+| interval p50 | 8.34ms, one vsync at 120Hz |
+| p90 | 8.43ms |
+| p95 | 16.64ms |
+| 1-vsync | 93.1% |
+| 2-vsync | 2.9% |
+| 3+ | 4.0% |
+
+Same shader, same geometry, same Reanimated and Skia, more pixels than the
+Duo has and twice the refresh rate, and it keeps up. Android after every fix
+in this document presents 83.3% of frames late; iOS presents 93.1% on time.
+
+So the curl is not too expensive to draw and the architecture around it is
+sound. What is left is the queue described above, which iOS does not have.
+
 ## Consequences
 
 Work that reduces per-frame cost in the app -- shader, allocations, mapper

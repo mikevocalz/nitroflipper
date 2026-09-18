@@ -211,6 +211,12 @@ export function PageCurlView({
     source.pageCount,
     (index) => shouldUseSpread({ width, height }, source.getPageBox(index), 'auto'),
     spreadProp ?? true,
+    // A page the document calls centre is a single: a cover, or a spread the
+    // artist drew across both leaves. Pairing a cover with page one shifts
+    // every spread after it by a page, so the two halves of each drawing land
+    // either side of a turn. Sources that do not say default to 'auto', which
+    // pairs as before.
+    (index) => source.spreadSlotOf?.(index) === 'center',
   ), [source, source.pageCount, width, height, spreadProp,
     generations.document, generations.layout]);
   const plan = planSpreadAt(groups, pageIndex);
