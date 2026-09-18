@@ -19,12 +19,19 @@ Pod::Spec.new do |s|
   ]
 
   # The vendored decoders are third-party C that does not compile warning-clean
-  # and is not ours to fix.
-  s.exclude_files = "cpp/vendor/**/*"
+  # and is not ours to fix. stb is header-only, so excluding it costs nothing.
+  # miniz is not: ComicArchive calls into it, so excluding miniz.c compiled
+  # headers-only and left every mz_* symbol undefined at link time, which is a
+  # CBZ reader that cannot link on iOS at all. It is compiled here with its
+  # warnings turned off rather than dropped. Android already builds it, through
+  # add_library(miniz ...) in CMakeLists.txt.
+  s.exclude_files = "cpp/vendor/stb/**/*"
   s.preserve_paths = "cpp/vendor/**/*"
 
   s.pod_target_xcconfig = {
     "CLANG_CXX_LANGUAGE_STANDARD" => "c++20",
+    # miniz.c is vendored third-party C and is not ours to make warning-clean.
+    "WARNING_CFLAGS" => "-Wno-everything",
     # Page decoding is CPU-bound C++ and a Debug pod builds at -O0, which on
     # device costs seconds per page turn. Optimize this pod in Debug too.
     "GCC_OPTIMIZATION_LEVEL[config=Debug]" => "2",

@@ -1,35 +1,25 @@
-import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PixelRatio, View } from 'react-native';
-import {
-  Canvas,
-  Group,
-  Image,
-  ImageShader,
-  Rect,
-  Shader,
-  Skia,
-  type SkImage,
-} from '@shopify/react-native-skia';
+import { Canvas, Fill, Skia, type SkImage, type SkShader } from '@shopify/react-native-skia';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import {
-  useDerivedValue,
-  useSharedValue,
-  withSpring,
-  withTiming,
+  cancelAnimation, useAnimatedReaction, useDerivedValue, useSharedValue,
+  withSpring, withTiming,
 } from 'react-native-reanimated';
-import { scheduleOnRN } from 'react-native-worklets';
-import { useStore } from 'zustand';
+import { scheduleOnRN, scheduleOnUI } from 'react-native-worklets';
 
-import type { PageBox, PageSource } from '../types';
+import type { PageSource } from '../types';
 import { shouldUseSpread } from '../pagination/SpreadPolicy';
 import { PAGE_CURL_SKSL } from './pageCurlShader';
-import { createPageStore, type PageStore } from './pageStore';
+import { PageTextureCache, textureBytes, type PageKey } from './PageTextureCache';
+import { buildSpreadGroups, planSpreadAt, type SpreadGroup } from './spreadPlan';
+import { FrameLifetime } from './FrameLifetime';
+import { groupShaders, PAGE_BACKGROUND, type CurlFrame } from './curlFrame';
+import { leafHinge, pagePlacement } from './pagePlacement';
 import {
-  PageTextureCache,
-  textureBytes,
-  type PageKey,
-} from './PageTextureCache';
-import { buildSpreadGroups, planSpreadAt } from './spreadPlan';
+  clampZoom, FIT, paneAt, rasterDensity, zoomAbout,
+  type ZoomBounds, type ZoomTransform,
+} from './zoom';
 
 interface PageCurlViewProps {
   source: PageSource;
@@ -60,8 +50,8 @@ interface PageCurlViewProps {
    * Stable identity for the document being shown.
    *
    * Part of the texture cache key, so swapping documents cannot serve the
-   * previous book's page 7 for the new book's page 7. Defaults to a per-view
-   * constant, which is correct while a view shows one document for its life.
+   * previous book's page 7 for the new book's page 7. Also scoped to the source
+   * instance, so replacing an anonymous source cannot reuse another book's pages.
    */
   documentId?: string;
   /**
@@ -79,13 +69,10 @@ interface PageCurlViewProps {
    */
   textureBudgetBytes?: number;
   /**
-   * Called when the pages on screen change, with the page indices now drawn.
-   *
-   * Not the same moment as `onPageIndexChange`, which fires the instant a turn
-   * commits. The canvas is a SurfaceView and composites independently of the
-   * React view hierarchy, so chrome driven by the requested index updates a
-   * frame before the page it is labelling -- the page counter ticks over while
-   * the old page is still on screen. Label the reader from this instead.
+   * Called once the UI runtime has built the replacement page's native paint.
+   * Use this for page labels instead of the earlier requested index. This is
+   * a submission acknowledgement; the canvas is composited on its own thread
+   * and gives React chrome no presentation fence to wait on.
    */
   onSpreadVisible?: (pages: readonly number[]) => void;
   /**
@@ -95,639 +82,965 @@ interface PageCurlViewProps {
    * reader just stays blank -- no page, no error, nothing to act on.
    */
   onPageLoadError?: (error: unknown) => void;
-}
-
-/** The pages a group covers, in reading order. */
-function pagesOfGroup(group: { start: number; size: number }): number[] {
-  return Array.from({ length: group.size }, (_, i) => group.start + i);
-}
-
-/** Generations to key the cache on, when the source publishes them. */
-function sourceGenerations(source: PageSource): {
-  document: number;
-  layout: number;
-} {
-  // MuPDFSource publishes these; ComicArchiveSource does not, and a CBZ has
-  // neither a relayout nor a reopen that changes its pages, so zeros are
-  // correct rather than a placeholder.
-  const withGenerations = source as PageSource & {
-    generations?: { document: number; layout: number };
+  /**
+   * Pinch, double-tap and drag-to-pan magnification.
+   *
+   * `1` is the fitted page -- what the reader shows at rest -- so the
+   * percentage a user sees is honest whatever the document's own page size is.
+   * Set `max` to 1 to switch magnification off entirely.
+   */
+  zoom?: {
+    /** Largest magnification. Default 4. */
+    max?: number;
+    /** What a double tap goes to, and back from. Default 2. */
+    doubleTap?: number;
+    /** Skip the animated transitions for double-tap and fit. */
+    reducedMotion?: boolean;
   };
-  return withGenerations.generations ?? { document: 0, layout: 0 };
+  /**
+   * Called when magnification settles, not per frame.
+   *
+   * Fires after a pinch or double tap comes to rest, so chrome can show a
+   * percentage without re-rendering the reader sixty times a second.
+   */
+  onZoomChange?: (zoom: { scale: number; x: number; y: number }) => void;
+  /**
+   * Zoom as if the reader had pinched. `id` must change per request so
+   * repeated presses of the same control each take effect.
+   *
+   * `in` and `out` step by a factor of two; a number is an absolute scale where
+   * 1 is the fitted page. Anchored on the centre of the pane being inspected,
+   * or the first page in reading order when nothing has been claimed yet.
+   */
+  zoomRequest?: { to: number | 'in' | 'out' | 'fit'; id: number };
 }
 
-function makeImageFromBytes(bytes: ArrayBuffer) {
-  const data = Skia.Data.fromBytes(new Uint8Array(bytes));
-  return Skia.Image.MakeImageFromEncoded(data);
-}
-
-/** Resolve after `count` drawn frames, so a UI-thread write can follow a mount. */
-function nextFrames(count: number): Promise<void> {
-  return new Promise((resolve) => {
-    const step = (remaining: number) => {
-      if (remaining <= 0) {
-        resolve();
-        return;
-      }
-      requestAnimationFrame(() => step(remaining - 1));
-    };
-    step(count);
-  });
-}
-
-/** A flick this fast decides the turn regardless of how far it got. */
 const FLICK_VELOCITY = 400;
-/** Past this fraction of the page, a released drag falls open. */
-const COMMIT_AT = 0.5;
+/** Past this the reader is magnified: one finger pans instead of turning. */
+const ZOOMED = 1.01;
 /**
- * Ceiling on the speed a release hands the animation, in pages per second.
+ * Largest page raster we will ask for, per side.
  *
- * Carrying the finger's speed keeps the motion continuous, but a hard flick
- * measures thousands of pixels a second: the spring then covers what is left
- * of the page inside a single frame and the turn reads as a snap rather than a
- * page falling. A page still turns in about a third of a second at this
- * ceiling, which is roughly what paper does.
+ * A page rastered at 4x is 16x the pixels, which is how a reader runs a device
+ * out of memory inspecting a single comic panel. GLES guarantees only 2048;
+ * every target here does 8192, and `rasterDensity` steps down to whatever
+ * power of two actually fits rather than failing to allocate mid-pinch.
  */
+const MAX_TEXTURE_SIDE = 8192;
+const COMMIT_AT = 0.5;
 const MAX_RELEASE_SPEED = 3;
+const sourceIds = new WeakMap<PageSource, number>();
+let nextSourceId = 1;
+
+function sourceId(source: PageSource): number {
+  let id = sourceIds.get(source);
+  if (id === undefined) {
+    id = nextSourceId++;
+    sourceIds.set(source, id);
+  }
+  return id;
+}
+
+function pagesOf(group: SpreadGroup | null): number[] {
+  return group ? Array.from({ length: group.size }, (_, i) => group.start + i) : [];
+}
 
 export function PageCurlView({
-  source,
-  pageIndex,
-  onPageIndexChange,
-  width,
-  height,
-  spread: spreadProp,
-  gutter = 0,
-  onLayoutChange,
-  turnRequest,
-  documentId = 'default',
-  appearance = 'default',
-  textureBudgetBytes,
-  onSpreadVisible,
-  onPageLoadError,
+  source, pageIndex, onPageIndexChange, width, height,
+  spread: spreadProp, gutter = 0, onLayoutChange, turnRequest,
+  documentId = 'default', appearance = 'default', textureBudgetBytes,
+  onSpreadVisible, onPageLoadError, zoom: zoomOptions, onZoomChange, zoomRequest,
 }: PageCurlViewProps) {
-  // The whole animation is one scalar on the UI thread. The curl itself is
-  // evaluated per pixel by the shader, so a frame costs no JS at all.
-  const progress = useSharedValue(0);
-
   const effect = useMemo(() => Skia.RuntimeEffect.Make(PAGE_CURL_SKSL), []);
-
-  const viewport = { width, height };
-  const fitsTwoUp = (b: PageBox) => shouldUseSpread(viewport, b, 'auto');
-  const generations = sourceGenerations(source);
-
-  // Pair two pages only when both can sit two-up. A double-width page (a
-  // drawn spread) is shown alone across the viewport instead of squeezed
-  // into half of it.
-  //
-  // Grouped for the whole book, not for the page you are on: after a page
-  // shown alone the pairing parity flips, so a back-turn that subtracts the
-  // current group's size lands between two groups and the way back stops
-  // matching the way out. See spreadPlan.ts.
-  const groups = useMemo(
-    () =>
-      buildSpreadGroups(
-        source.pageCount,
-        (index) => fitsTwoUp(source.getPageBox(index)),
-        spreadProp ?? true,
-      ),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [source, source.pageCount, width, height, gutter, spreadProp,
-     generations.document, generations.layout],
-  );
-  const plan = planSpreadAt(groups, pageIndex);
-  const spread = plan.spread;
-  const step = plan.step;
-  const leafIndex = plan.leafIndex;
-  const leftBox = source.getPageBox(plan.pages[0]);
-  const box = source.getPageBox(leafIndex);
-
-  // A normal page shown alone still belongs in one display half — centering
-  // it would straddle a fold. A true double-width page may span both.
-  // A page shown alone gets the whole viewport. Confining it to one half
-  // leaves the other half dead black, which reads as a broken render.
-  const soloInHalf = false;
+  const progress = useSharedValue(0);
+  // Frames the reader can land on without waiting for React. See stageLanding.
+  const landingAhead = useSharedValue<CurlFrame | null>(null);
+  const landingBehind = useSharedValue<CurlFrame | null>(null);
+  const consumed = useRef(new Set<number>());
+  const dir = useSharedValue(1);
+  const turning = useSharedValue(true);
+  const dragging = useSharedValue(false);
+  const requested = useSharedValue(0);
+  const frame = useSharedValue<CurlFrame | null>(null);
+  // Frames that could not be painted because their native children were gone.
+  // Should stay at zero; a non-zero count is a lifetime bug, not a slow device.
+  const released = useSharedValue(0);
+  // The live view transform, and the copy a gesture started from. Anchoring a
+  // pinch against the live one while the focal point also moves counts that
+  // movement twice and the page crawls out from under the fingers.
+  const view = useSharedValue<ZoomTransform>(FIT);
+  const viewStart = useSharedValue<ZoomTransform>(FIT);
+  // Pointer count at the last pan sample. A change means a finger arrived or
+  // left, so the pan rebases instead of jumping by the whole new translation.
+  const panFrom = useSharedValue({ x: 0, y: 0, pointers: 0 });
+  const panning = useSharedValue(false);
+  // The view the pan is measured from, re-taken whenever the finger count
+  // changes so nothing jumps as a finger arrives or leaves.
+  const panBase = useSharedValue<ZoomTransform>(FIT);
+  // Double-tap animation. Interpolating between two already-legal transforms
+  // and clamping each frame means the page cannot leave its bounds part-way.
+  const morph = useSharedValue(1);
+  const morphFrom = useSharedValue<ZoomTransform>(FIT);
+  const morphTo = useSharedValue<ZoomTransform>(FIT);
+  // The pane the current magnification belongs to. Whole viewport until a
+  // gesture picks one, so an un-zoomed reader behaves exactly as before.
+  const pane = useSharedValue<ZoomBounds>({ x: 0, y: 0, width: 0, height: 0 });
+  const epoch = useRef(0);
+  const travel = useRef(1);
+  const lifetime = useRef(new FrameLifetime()).current;
+  const cache = useRef(new PageTextureCache({ budgetBytes: 0 })).current;
+  // Serialize native reads across cancelled effects as well as within a load.
+  const decodeTail = useRef<Promise<void>>(Promise.resolve());
+  const callbacks = useRef({ onPageIndexChange, onSpreadVisible, onPageLoadError });
+  callbacks.current = { onPageIndexChange, onSpreadVisible, onPageLoadError };
+  const notifiedGeneration = useRef(0);
+  const generations = (source as PageSource & {
+    generations?: { document: number; layout: number };
+  }).generations ?? { document: 0, layout: 0 };
+  const identity = `${sourceId(source)}:${encodeURIComponent(documentId)}`;
+  const screen = PixelRatio.get();
+  // Extra raster density asked of the document while magnified. Quantised to
+  // powers of two and only republished when a gesture settles, so a pinch asks
+  // for at most a couple of rasters instead of one per frame. It lands in the
+  // texture cache key through renderWidth/renderHeight, so an old density can
+  // never be served for a new one.
+  const [density, setDensity] = useState(1);
+  const scale = screen * density;
   const rtl = source.progressionDirection === 'rtl';
+  const groups = useMemo(() => buildSpreadGroups(
+    source.pageCount,
+    (index) => shouldUseSpread({ width, height }, source.getPageBox(index), 'auto'),
+    spreadProp ?? true,
+    // A page the document calls centre is a single: a cover, or a spread the
+    // artist drew across both leaves. Pairing a cover with page one shifts
+    // every spread after it by a page, so the two halves of each drawing land
+    // either side of a turn. Sources that do not say default to 'auto', which
+    // pairs as before.
+    (index) => source.spreadSlotOf?.(index) === 'center',
+  ), [source, source.pageCount, width, height, spreadProp,
+    generations.document, generations.layout]);
+  const plan = planSpreadAt(groups, pageIndex);
+  const { step, spread } = plan;
+  useEffect(() => { onLayoutChange?.({ step, spread }); }, [onLayoutChange, step, spread]);
 
-  const halfWidth = spread || soloInHalf ? (width - gutter) / 2 : width;
-  const fit = (b: PageBox) => {
-    const s = Math.min(halfWidth / b.width, height / b.height);
-    return { w: b.width * s, h: b.height * s };
-  };
-  const leftFit = fit(leftBox);
-  const leafFit = fit(box);
+  useAnimatedReaction(
+    () => morph.value,
+    (t) => {
+      if (t >= 1) return;
+      const a = morphFrom.value;
+      const b = morphTo.value;
+      view.value = clampZoom({
+        scale: a.scale + (b.scale - a.scale) * t,
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+      }, pane.value);
+    }, [],
+  );
 
-  // Pages butt against the spine so they meet like a bound book; on a
-  // dual-screen the fold itself becomes the gutter.
-  const spineX = width / 2;
-  const leftTx = spineX - gutter / 2 - leftFit.w;
-  const rightTx = spineX + gutter / 2;
-  const leafTx = spread
-    ? rightTx
-    : soloInHalf
-      ? rtl
-        ? rightTx
-        : leftTx
-      : (width - leafFit.w) / 2;
-  const leafTy = (height - leafFit.h) / 2;
-  const leftTy = (height - leftFit.h) / 2;
+  const recorded = useCallback((revision: number, generation: number, pages: number[]) => {
+    lifetime.recorded(revision);
+    if (generation !== epoch.current || notifiedGeneration.current === generation) return;
+    notifiedGeneration.current = generation;
+    callbacks.current.onSpreadVisible?.(pages);
+  }, [lifetime]);
+  const discard = useCallback((revision: number) => lifetime.discard(revision), [lifetime]);
 
-  // A page control turns the page through the same curl a flick does, so the
-  // two read as one interaction — and the animation covers any decode.
+  // A single native paint is the handoff boundary. The runtime shader takes
+  // independent native references to all six children BEFORE an older frame's
+  // wrappers can be released. Skia consumes one animated paint, so it cannot
+  // observe new textures with the previous progress (or the reverse).
+  // Two paints, used alternately, rather than one per frame or one reused.
+  //
+  // Reanimated drops a write whose value is identical to the last one, and
+  // `paint` is the only shared value in the Skia tree, so a single reused paint
+  // would never mark Skia's container mapper dirty and the canvas would freeze
+  // on frame one. Alternating means the value is never equal to the previous
+  // one, so the write always lands -- and allocating a native paint per frame
+  // (a host object, a setPrototypeOf call out to JS, and garbage for Hermes to
+  // collect mid-animation) stops entirely. Handing the same paint back every
+  // other frame is safe because the recorder copies it by value when it records
+  // the frame, so the copy this frame's picture holds is not the object the
+  // frame after next writes into.
+  const pool = useMemo(() => ({ paints: [Skia.Paint(), Skia.Paint()], at: 0 }), []);
+  // Revision of the frame the paint below was last built from, so the reader
+  // can be told what is on screen without putting another derived value
+  // between the paint and Skia.
+  const built = useSharedValue(0);
+  const paint = useDerivedValue(() => {
+    const current = frame.value;
+    pool.at = pool.at === 0 ? 1 : 0;
+    const paint = pool.paints[pool.at];
+    // Reused, so it carries the last turn's shader until this frame sets one.
+    paint.setShader(null);
+    let shaded = false;
+    if (current && effect) {
+      // Which leaf is hinged, and where. A spread hinges down the middle; a
+      // single centred page hinges on its own inner edge, so the leaf is the
+      // page rather than half an otherwise empty viewport.
+      const leafSign = current.rtl ? -dir.value : dir.value;
+      const { spineX, leafW } = leafHinge(current.width,
+        dir.value > 0 ? current.forwardLeaf : current.backwardLeaf,
+        current.pages.length > 1, leafSign);
+      const landingSize = dir.value > 0 ? current.nextSize : current.previousSize;
+      // Seatbelt, not the mechanism. FrameLifetime's hold/taken rules are what
+      // keep a frame's children alive while anything still points at it; if
+      // one is released early anyway, Skia throws "Attempted to access a
+      // disposed object" from here and the error takes the whole surface down
+      // with it. A reader that loses its page on a resize is a bug; a reader
+      // that shows the page background for one frame is a glitch.
+      try {
+        const magnified = view.value;
+        const shader = effect.makeShaderWithChildren([
+          progress.value, current.width / 2, dir.value, spineX, leafW, leafSign,
+          landingSize > 1 ? -leafSign : leafSign,
+          magnified.scale, magnified.x, magnified.y,
+          pane.value.x, pane.value.y,
+          pane.value.x + pane.value.width, pane.value.y + pane.value.height,
+        ], current.children);
+        paint.setShader(shader);
+        shader.dispose();
+        shaded = true;
+      } catch {
+        released.value += 1;
+      }
+    }
+    // A bound shader makes the paint's colour dead, so setting one on the normal
+    // path costs a CSS parse and a Float32Array every frame for a value nothing
+    // reads. It is only visible on the two fallbacks above -- no frame yet, or a
+    // disposed child -- where it still has to be the page background.
+    if (!shaded) paint.setColor(Skia.Color(PAGE_BACKGROUND));
+    // Published from inside this worklet rather than derived from its result.
+    // A second derived value reading this one puts Skia's own mapper a link
+    // further down the chain, and Reanimated needs an extra pass -- and an
+    // extra scheduled frame -- to settle it, which queues a second buffer in
+    // the same vsync. The display then shows one and drops the other, and a
+    // turn that renders 60 distinct frames a second presents about 40.
+    // A number compares equal, so an unchanged revision writes nothing.
+    built.value = current?.revision ?? 0;
+    return paint;
+  });
+  useAnimatedReaction(
+    () => built.value,
+    (revision, previous) => {
+      if (!revision || revision === previous) return;
+      // Read the frame here rather than carrying its fields through the paint:
+      // this runs in the same mapper pass that just built it.
+      const current = frame.value;
+      if (current) {
+        scheduleOnRN(recorded, revision, current.generation, current.pages);
+      }
+    }, [recorded],
+  );
+
+  const commit = useCallback((generation: number, target: number, forward: boolean,
+    landed: number) => {
+    // A landing that is now on screen must not be discarded when this load is
+    // superseded -- the frame drawing it owns those shaders.
+    if (landed !== 0) {
+      consumed.current.add(landed);
+      lifetime.taken(landed);
+    }
+    if (generation !== epoch.current) return;
+    travel.current = forward ? 1 : -1;
+    callbacks.current.onPageIndexChange?.(target);
+  }, [lifetime]);
+
+  useEffect(() => {
+    const generation = ++epoch.current;
+    let cancelled = false;
+    const staged: number[] = [];
+    // The landing currently held for each direction. Rebuilding one has to
+    // retire the frame it replaces: nothing else will, now that a held
+    // revision is exempt from the sweep.
+    const stagedFor = { forward: 0, backward: 0 };
+    const retained = new Map<number, { key: PageKey; image: SkImage }>();
+    const here: SpreadGroup = { start: plan.pages[0], size: plan.step };
+    let nextReady = false;
+    let previousReady = false;
+    scheduleOnUI(() => {
+      'worklet';
+      requested.value = generation;
+      cancelAnimation(progress);
+      turning.value = true;
+      dragging.value = false;
+    });
+
+    const cancelLoad = () => {
+      cancelled = true;
+      if (epoch.current === generation) epoch.current += 1;
+      for (const revision of staged) {
+        // A landing the reader never took still owns shaders and cache holds.
+        if (!consumed.current.has(revision)) lifetime.discard(revision);
+        consumed.current.delete(revision);
+      }
+      scheduleOnUI(() => {
+        'worklet';
+        landingAhead.value = null;
+        landingBehind.value = null;
+        if (requested.value !== generation) return;
+        requested.value = 0;
+        cancelAnimation(progress);
+        turning.value = true;
+        dragging.value = false;
+      });
+    };
+    if (source.pageCount === 0 || width <= 0 || height <= 0) {
+      const revision = lifetime.stage(() => undefined);
+      cache.clear();
+      scheduleOnUI(() => {
+        'worklet';
+        frame.value = null;
+        progress.value = 0;
+        scheduleOnRN(recorded, revision, generation, []);
+      });
+      return cancelLoad;
+    }
+
+    const placement = (index: number) => pagePlacement(source.getPageBox(index),
+      planSpreadAt(groups, index).spread ? 'right' : 'center', width, height, gutter);
+    const keyFor = (index: number): PageKey => {
+      const rect = placement(index);
+      return { documentId: identity, documentGeneration: generations.document,
+        layoutGeneration: generations.layout, pageIndex: index,
+        renderWidth: Math.max(1, Math.ceil(rect.width * scale)),
+        renderHeight: Math.max(1, Math.ceil(rect.height * scale)), rotation: 0, appearance };
+    };
+    const inFlight = [...pagesOf(here), ...pagesOf(plan.next), ...pagesOf(plan.previous)];
+    const budget = textureBudgetBytes ?? Math.max(32 * 1024 * 1024,
+      Math.ceil(1.5 * inFlight.reduce((bytes, index) => {
+        const key = keyFor(index);
+        return bytes + textureBytes(key.renderWidth, key.renderHeight);
+      }, 0)));
+    cache.setBudget(budget);
+    cache.invalidateExcept(identity, generations.document, generations.layout);
+
+    const cached = (index: number): SkImage | null => {
+      if (cancelled) return null;
+      const existing = retained.get(index);
+      if (existing) return existing.image;
+      const key = keyFor(index);
+      const image = cache.retain(key);
+      if (image) retained.set(index, { key, image });
+      return image;
+    };
+    const read = (index: number): Promise<SkImage | null> => {
+      const task = decodeTail.current.then(async () => {
+        if (cancelled) return null;
+        const hit = cached(index);
+        if (hit) return hit;
+        const key = keyFor(index);
+        const bytes = await source.readPageScaled(index, key.renderWidth, key.renderHeight);
+        if (cancelled) return null;
+        const data = Skia.Data.fromBytes(new Uint8Array(bytes));
+        let image: SkImage | null;
+        try { image = Skia.Image.MakeImageFromEncoded(data); }
+        finally { data.dispose(); }
+        if (!image) throw new Error(`Could not decode page ${index}`);
+        const stored = cache.setAndRetain(key, image,
+          textureBytes(key.renderWidth, key.renderHeight));
+        retained.set(index, { key, image: stored });
+        return stored;
+      });
+      decodeTail.current = task.then(() => undefined, () => undefined);
+      return task;
+    };
+    const loadGroup = async (group: SpreadGroup | null) => {
+      for (const index of pagesOf(group)) {
+        if (cancelled) return;
+        await read(index);
+      }
+    };
+    // Measured from the hinge: the gutter is dead space carried by the leaf,
+    // and the crease has to cross it before the page starts to lift.
+    const leafSpan = (index: number, spread: boolean) =>
+      placement(index).width + (spread ? gutter / 2 : 0);
+    const isCached = (group: SpreadGroup | null) =>
+      group !== null && pagesOf(group).every((index) => cached(index) !== null);
+
+    const frameFor = (
+      base: SpreadGroup,
+      ahead: SpreadGroup | null,
+      behind: SpreadGroup | null,
+    ): CurlFrame => {
+      const children: SkShader[] = [];
+      const keys: PageKey[] = [];
+      try {
+        const images = new Map<number, SkImage>();
+        for (const [index, entry] of retained) {
+          if (!cache.retain(entry.key)) throw new Error(`Lost page ${index}`);
+          keys.push(entry.key);
+          images.set(index, entry.image);
+        }
+        for (const group of [base, ahead, behind]) {
+          children.push(...groupShaders(source, group, images, width, height, gutter));
+        }
+      } catch (error) {
+        for (const shader of children) shader.dispose();
+        for (const key of keys) cache.release(key);
+        throw error;
+      }
+      const revision = lifetime.stage(() => {
+        for (const shader of children) shader.dispose();
+        for (const key of keys) cache.release(key);
+      });
+      return {
+        revision, generation, width, height, rtl, children, pages: pagesOf(base),
+        // Same slot rules groupShaders uses, so the rect a gesture claims is
+        // the rect the page is actually drawn in.
+        panes: pagesOf(base).map((index, order) => pagePlacement(
+          source.getPageBox(index),
+          base.size === 1 ? 'center' : (order === 0) === !rtl ? 'left' : 'right',
+          width, height, gutter)),
+        forwardLeaf: leafSpan(base.start + base.size - 1, base.size > 1),
+        backwardLeaf: leafSpan(base.start, base.size > 1),
+        next: ahead?.start ?? null,
+        previous: behind?.start ?? null,
+        nextSize: ahead?.size ?? 0,
+        previousSize: behind?.size ?? 0,
+      };
+    };
+
+    const install = (current: CurlFrame, reset: boolean) => {
+      const revision = current.revision;
+      if (cancelled) {
+        lifetime.discard(revision);
+        return;
+      }
+      scheduleOnUI(() => {
+        'worklet';
+        if (requested.value !== generation) {
+          scheduleOnRN(discard, revision);
+          return;
+        }
+        frame.value = current;
+        if (reset) {
+          cancelAnimation(progress);
+          progress.value = 0;
+          turning.value = false;
+          dragging.value = false;
+        }
+      });
+    };
+
+    /**
+     * The frame the reader lands on, built before the turn commits.
+     *
+     * Committing used to hand the turn back to React: set the page index,
+     * re-render, re-run this effect, rebuild six shaders, publish. Measured on
+     * a Surface Duo that is 64ms in which the panel presents nothing while the
+     * page sits fully curled -- the one long gap in every turn. The landing
+     * frame is ready before the finger lets go, so the commit is a single
+     * assignment on the UI thread and React only has to catch up afterwards.
+     */
+    const stageLanding = (forward: boolean) => {
+      if (cancelled) return;
+      const group = forward ? plan.next : plan.previous;
+      if (group === null || !isCached(group)) return;
+      const onward = planSpreadAt(groups, group.start);
+      const ahead = forward ? onward.next : here;
+      const behind = forward ? here : onward.previous;
+      const ready = (candidate: SpreadGroup | null) =>
+        candidate === null ? null : isCached(candidate) ? candidate : null;
+      let landing: CurlFrame;
+      try {
+        landing = frameFor(group, ready(ahead), ready(behind));
+      } catch {
+        // A page went out of the cache between the check and the build; the
+        // turn still works, it just goes the slow way through React.
+        return;
+      }
+      const superseded = forward ? stagedFor.forward : stagedFor.backward;
+      if (superseded !== 0 && !consumed.current.has(superseded)) {
+        lifetime.discard(superseded);
+      }
+      if (forward) stagedFor.forward = landing.revision;
+      else stagedFor.backward = landing.revision;
+      lifetime.hold(landing.revision);
+      staged.push(landing.revision);
+      scheduleOnUI(() => {
+        'worklet';
+        if (requested.value !== generation) {
+          scheduleOnRN(discard, landing.revision);
+          return;
+        }
+        if (forward) landingAhead.value = landing;
+        else landingBehind.value = landing;
+      });
+    };
+
+    void (async () => {
+      if (!effect) throw new Error('Could not compile the page curl shader');
+      await loadGroup(here);
+      if (cancelled) return;
+      // Keep cached destinations attached on landing. Never replace them with
+      // current-page placeholders while decoding an unrelated neighbour.
+      nextReady = isCached(plan.next);
+      previousReady = isCached(plan.previous);
+      install(frameFor(here, nextReady ? plan.next : null,
+        previousReady ? plan.previous : null), true);
+      stageLanding(travel.current >= 0);
+      stageLanding(travel.current < 0);
+      const directions = travel.current >= 0 ? [true, false] : [false, true];
+      for (const forward of directions) {
+        if (cancelled) return;
+        const group = forward ? plan.next : plan.previous;
+        if (group === null || (forward ? nextReady : previousReady)) continue;
+        try {
+          await loadGroup(group);
+          if (cancelled) return;
+          if (forward) nextReady = true;
+          else previousReady = true;
+          install(frameFor(here, nextReady ? plan.next : null,
+            previousReady ? plan.previous : null), false);
+          stageLanding(forward);
+        } catch (error) {
+          if (!cancelled) callbacks.current.onPageLoadError?.(error);
+        }
+      }
+      // One group beyond the next turn, following the reader's direction.
+      const adjacent = travel.current >= 0 ? plan.next : plan.previous;
+      if (adjacent && !cancelled) {
+        const beyond = planSpreadAt(groups, adjacent.start);
+        await loadGroup(travel.current >= 0 ? beyond.next : beyond.previous);
+      }
+    })().catch((error) => {
+      if (!cancelled) callbacks.current.onPageLoadError?.(error);
+    }).finally(() => {
+      for (const { key } of retained.values()) cache.release(key);
+      retained.clear();
+    });
+    return cancelLoad;
+    // Callbacks are read from a ref; replacing chrome callbacks must not reload pages.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source, identity, pageIndex, groups, width, height, gutter, scale, appearance,
+    textureBudgetBytes, generations.document, generations.layout, effect]);
+
+  useEffect(() => () => {
+    // Retire only revisions from this mount. StrictMode can start another load
+    // before this UI task is acknowledged; its newer revisions must survive.
+    const tombstone = lifetime.stage(() => undefined);
+    cache.clear();
+    scheduleOnUI(() => {
+      'worklet';
+      cancelAnimation(progress);
+      frame.value = null;
+      scheduleOnRN(recorded, tombstone, 0, []);
+    });
+  }, [cache, frame, lifetime, progress, recorded]);
+
+  // Turning to another page starts fitted. Carrying a 4x magnification of the
+  // top-left corner onto the next page shows the reader a crop of something
+  // they have not seen yet.
+  useEffect(() => {
+    scheduleOnUI(() => {
+      'worklet';
+      morph.value = 1;
+      view.value = FIT;
+      viewStart.value = FIT;
+    });
+    setDensity(1);
+  }, [pageIndex, identity, morph, view, viewStart]);
+
+  // A resize -- rotation, a fold, a window change -- keeps the magnification
+  // and re-legalises it against the new viewport, rather than throwing away
+  // what the reader was inspecting.
+  useEffect(() => {
+    scheduleOnUI(() => {
+      'worklet';
+      // The pane moved with the viewport, so re-legalise against the new one.
+      pane.value = { x: 0, y: 0, width, height };
+      view.value = clampZoom(view.value, pane.value);
+      viewStart.value = view.value;
+    });
+  }, [width, height, view, viewStart, pane]);
+
+  const zoomRequestId = zoomRequest?.id ?? 0;
+  const zoomTarget = zoomRequest?.to ?? 'fit';
+  useEffect(() => {
+    if (zoomRequestId === 0) return;
+    scheduleOnUI(() => {
+      'worklet';
+      const current = frame.value;
+      if (pane.value.width === 0) {
+        // Nothing claimed yet: inspect the page that is read first, not both
+        // halves of the spread at once.
+        pane.value = current && current.panes.length > 0
+          ? current.panes[0] : { x: 0, y: 0, width, height };
+      }
+      const now = view.value.scale;
+      const target = zoomTarget === 'fit' ? 1
+        : zoomTarget === 'in' ? now * 2
+          : zoomTarget === 'out' ? now / 2
+            : zoomTarget;
+      const box = pane.value;
+      const next = zoomAbout(view.value, box.x + box.width / 2, box.y + box.height / 2,
+        target, box, zoomLimits);
+      if (reducedMotion) {
+        view.value = next;
+        viewStart.value = next;
+          return;
+      }
+      morphFrom.value = view.value;
+      morphTo.value = next;
+      morph.value = 0;
+      morph.value = withTiming(1, { duration: 200 }, (done) => {
+        if (!done) return;
+        view.value = morphTo.value;
+        viewStart.value = morphTo.value;
+        });
+    });
+    // Each request is consumed once; unrelated re-renders must not replay it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [zoomRequestId]);
+
   const requestId = turnRequest?.id ?? 0;
   const requestDir = turnRequest?.dir ?? 1;
+  const canTurn = onPageIndexChange !== undefined;
   useEffect(() => {
-    if (requestId === 0 || turning.value) return;
-    const forward = requestDir > 0;
-    if (forward ? !canAdvance : !canGoBack) return;
-    dir.value = forward ? 1 : -1;
-    progress.value = 0;
-    turning.value = true;
-    progress.value = withTiming(1, { duration: 320 }, (finished) => {
+    if (requestId === 0 || !canTurn) return;
+    scheduleOnUI(() => {
       'worklet';
-      if (finished) scheduleOnRN(commitDirection, forward);
+      const current = frame.value;
+      const forward = requestDir > 0;
+      const target = forward ? current?.next : current?.previous;
+      if (!current || current.generation !== requested.value || turning.value ||
+        dragging.value || target == null) return;
+      dir.value = forward ? 1 : -1;
+      progress.value = 0;
+      turning.value = true;
+      progress.value = withTiming(1, { duration: 320 }, (finished) => {
+        if (finished) {
+          scheduleOnRN(commit, current.generation, target, forward,
+            land(forward, target));
+        }
+      });
     });
+    // Each request is consumed once; readiness changes must not replay a tap.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [requestId]);
 
-  useEffect(() => {
-    onLayoutChange?.({ step, spread });
-  }, [onLayoutChange, step, spread]);
-
-  const canAdvance = plan.next !== null;
-
-  // Four half-pages: the spread you are on and the one you are turning to.
-  // The turning sheet spans both halves so the curl crosses the spine.
-  // Per-instance vanilla store — two readers on one screen keep their own
-  // pages, and no component state lives in React.
-  const storeRef = useRef<PageStore | null>(null);
-  if (storeRef.current == null) storeRef.current = createPageStore();
-  const pages = useStore(storeRef.current, (s) => s.pages);
-  const setPages = storeRef.current.getState().setPages;
-
-  // Decoded pages are reused across turns: the spread you turn *to* becomes
-  // the spread you turn *from*, so re-decoding it costs megabytes for nothing.
-  //
-  // Keyed on full identity, not page index. Index alone collides across
-  // relayouts, viewport changes and document swaps -- see
-  // docs/adr/0003-cache-identity-and-budget.md.
-  const cacheRef = useRef<PageTextureCache | null>(null);
-  // What the frame currently on screen is holding, so it can be released only
-  // once its replacement is up. Dispose-on-load is what could pull a texture
-  // out from under the shader mid-curl.
-  const retainedRef = useRef<PageKey[]>([]);
-  // Which way the reader is moving, so the warm-up follows them rather than
-  // always running forward. 1 on first open: a book opens going forward.
-  const travelRef = useRef(1);
-
-  const scale = PixelRatio.get();
   /**
-   * The raster a page is decoded at, from that page's own slot.
+   * Show the pre-built landing frame, if the reader is turning to it.
    *
-   * Not from the spread you happen to be on: a double-width page is shown
-   * alone across the whole viewport, so while one is on screen every
-   * neighbour was being decoded at full-viewport size -- 24MB a page instead
-   * of 8MB -- and then decoded all over again at half size on the next turn,
-   * because the raster is part of the cache key. Three of those pages sit
-   * together near the end of a typical comic, which is where the reader ran
-   * out of memory and drew nothing.
+   * Returns the revision taken, so the load that staged it knows not to throw
+   * it away. Zero means there was none and the turn goes the slow way: React
+   * re-renders, the loader rebuilds the shaders, and the panel shows the same
+   * fully-curled page until it lands.
    */
-  const rasterOf = (index: number) => {
-    const group = planSpreadAt(groups, index);
-    const slotWidth = group.spread ? (width - gutter) / 2 : width;
-    const b = source.getPageBox(index);
-    const s = Math.min(slotWidth / b.width, height / b.height);
-    return {
-      w: Math.ceil(b.width * s * scale),
-      h: Math.ceil(b.height * s * scale),
-    };
+  const land = (forward: boolean, target: number) => {
+    'worklet';
+    const landing = forward ? landingAhead.value : landingBehind.value;
+    landingAhead.value = null;
+    landingBehind.value = null;
+    if (!landing || landing.pages[0] !== target) return 0;
+    frame.value = landing;
+    progress.value = 0;
+    turning.value = false;
+    dragging.value = false;
+    return landing.revision;
   };
 
-  // Budget the pages actually in flight, at the size each is actually decoded
-  // at: the spread you are on, the one ahead, the one behind, and the warm-up
-  // beyond. A budget below the working set evicts a page the current frame is
-  // about to draw and re-decodes it on the next swipe -- the reader flickers
-  // and pages come back blank while turning back and forth. Half again over
-  // the measured need is the headroom.
-  const inFlight = [
-    ...plan.pages,
-    ...(plan.next ? pagesOfGroup(plan.next) : []),
-    ...(plan.previous ? pagesOfGroup(plan.previous) : []),
-  ];
-  const budgetBytes =
-    textureBudgetBytes ??
-    Math.max(
-      Math.ceil(
-        1.5 *
-          inFlight.reduce((total, index) => {
-            const r = rasterOf(index);
-            return total + textureBytes(r.w, r.h);
-          }, 0),
-      ),
-      32 * 1024 * 1024,
-    );
 
-  if (cacheRef.current === null) {
-    cacheRef.current = new PageTextureCache({ budgetBytes });
-  }
-  // The raster size changes with the viewport, so the budget has to follow it.
-  cacheRef.current.setBudget(budgetBytes);
+  const maxZoom = Math.max(1, zoomOptions?.max ?? 4);
+  const doubleTapZoom = Math.min(maxZoom, Math.max(1, zoomOptions?.doubleTap ?? 2));
+  const reducedMotion = zoomOptions?.reducedMotion ?? false;
+  const zoomLimits = useMemo(() => ({ min: 1, max: maxZoom }), [maxZoom]);
 
-  useEffect(() => {
-    let cancelled = false;
-    const cache = cacheRef.current;
-    if (cache === null) return;
-
-    const keyFor = (index: number, raster: { w: number; h: number }): PageKey => ({
-      documentId,
-      documentGeneration: generations.document,
-      layoutGeneration: generations.layout,
-      pageIndex: index,
-      renderWidth: raster.w,
-      renderHeight: raster.h,
-      rotation: 0,
-      appearance,
-    });
-
-    // A relayout or a new document invalidates everything that came before,
-    // so a late loader cannot repopulate a retired cache.
-    cache.invalidateExcept(documentId, generations.document, generations.layout);
-
-    // Retained the moment it exists, not after every read has finished.
-    // peek() does not retain, so a later set() in the same pass could evict
-    // an image this pass was still holding -- and a disposed SkImage draws
-    // nothing.
-    const runRetained: PageKey[] = [];
-    const read = async (index: number | null): Promise<SkImage | null> => {
-      if (index === null || index < 0 || index >= source.pageCount) return null;
-      const raster = rasterOf(index);
-      const key = keyFor(index, raster);
-
-      const hit = cache.peek(key);
-      if (hit !== null) {
-        if (cache.retain(key) !== null) runRetained.push(key);
-        return hit;
-      }
-
-      const bytes = await source.readPageScaled(index, raster.w, raster.h);
-      if (cancelled) return null;
-      const image = makeImageFromBytes(bytes);
-      if (image === null) return null;
-      const stored = cache.set(key, image, textureBytes(raster.w, raster.h));
-      if (cache.retain(key) !== null) runRetained.push(key);
-      return stored;
-    };
-
-    /** Hand back everything a pass retained but the frame does not hold. */
-    const releaseRun = (keys: PageKey[]) => {
-      for (const key of keys) cache.release(key);
-      keys.length = 0;
-    };
-
-    /**
-     * The visible pair becomes the frame; the previous frame lets go.
-     *
-     * Retain-then-release, never the reverse: releasing first can drop the
-     * last reference to an image the shader is sampling this very frame.
-     */
-    const replaceFrameRetains = () => {
-      const previous = retainedRef.current;
-      retainedRef.current = [...runRetained];
-      runRetained.length = 0;
-      for (const key of previous) cache.release(key);
-    };
-
-    /**
-     * The neighbours join the frame.
-     *
-     * Appended, not swapped in: the visible pair is still on screen and must
-     * keep its retains, or the next eviction disposes the page being drawn.
-     */
-    const addFrameRetains = () => {
-      retainedRef.current = [...retainedRef.current, ...runRetained];
-      runRetained.length = 0;
-    };
-
-    const here = planSpreadAt(groups, pageIndex);
-    /** Left and right slot for a group: a solo page occupies the right slot. */
-    const slotsOf = (group: { start: number; size: number } | null) =>
-      group === null
-        ? { left: null, right: null }
-        : {
-            left: group.size === 2 ? group.start : null,
-            right: group.start + group.size - 1,
-          };
-    const from = slotsOf({ start: here.pages[0], size: here.step });
-    const to = slotsOf(here.next);
-    const prev = slotsOf(here.previous);
-
-    (async () => {
-      // Sequential, not Promise.all: a page decodes to megabytes of RGBA and
-      // several at once can fail the allocation silently.
-      //
-      // Two passes, because the reader is waiting on the first one. The pages
-      // you can SEE are published as soon as they exist -- that publish is
-      // what clears the turn guard -- and the neighbours the curl will need
-      // are filled in behind it. Loading all six before publishing anything
-      // is what made a back-turn sit on a frozen curl: the spread behind the
-      // one you just landed on had never been prefetched, so every back-turn
-      // waited on two fresh decodes before the reader came back to life.
-      const fromLeft = await read(from.left);
-      const fromRight = await read(from.right);
-      if (cancelled) {
-        releaseRun(runRetained);
-        return;
-      }
-      replaceFrameRetains();
-      setPages({
-        fromLeft,
-        fromRight,
-        toLeft: null,
-        toRight: null,
-        prevLeft: null,
-        prevRight: null,
-      });
-
-      // Laying the sheet flat is a write to the UI thread and lands at once;
-      // mounting the new textures goes through a React commit and lands a
-      // frame or two later. Reset progress first and the canvas draws the
-      // PREVIOUS page flat in between -- the page you just turned away from
-      // flashing back before the new one appears. Wait for the frames that
-      // carry the mount, then lay it flat.
-      //
-      // The destination halves stay unpublished until after that, so a curl
-      // sitting at full progress can only be showing the page that is about
-      // to become the flat one.
-      await nextFrames(2);
-      if (cancelled) return;
-      progress.value = 0;
-      turning.value = false;
-      onSpreadVisible?.(here.pages);
-
-      const toLeft = await read(to.left);
-      const toRight = await read(to.right);
-      const prevLeft = await read(prev.left);
-      const prevRight = await read(prev.right);
-      if (cancelled) {
-        releaseRun(runRetained);
-        return;
-      }
-      addFrameRetains();
-      setPages({ fromLeft, fromRight, toLeft, toRight, prevLeft, prevRight });
-
-      // Warm the spread beyond the one you are heading for, in the direction
-      // you are actually travelling. Prefetching forward while the reader
-      // pages backward warms pages they are walking away from and leaves the
-      // ones they are walking into cold.
-      const ahead =
-        travelRef.current >= 0
-          ? here.next && planSpreadAt(groups, here.next.start).next
-          : here.previous && planSpreadAt(groups, here.previous.start).previous;
-      const warm = slotsOf(ahead ?? null);
-      // A warm-up is not a frame dependency: release its retains as soon as
-      // it lands so it can be evicted under pressure.
-      const warmed: PageKey[] = [];
-      const takeWarm = () => {
-        warmed.push(...runRetained);
-        runRetained.length = 0;
-      };
-      if (!cancelled) {
-        await read(warm.left);
-        takeWarm();
-      }
-      if (!cancelled) {
-        await read(warm.right);
-        takeWarm();
-      }
-      releaseRun(warmed);
-    })().catch((error) => {
-      releaseRun(runRetained);
-      if (cancelled) return;
-      // Release the turn guard, or a failed load locks the reader on a page
-      // it never managed to draw.
-      turning.value = false;
-      onPageLoadError?.(error);
-    });
-    return () => {
-      cancelled = true;
-    };
-    // width/height/gutter are in the list on purpose: the raster follows the
-    // viewport and the pixel density, and leaving them out is why rotating the
-    // device used to leave correctly laid out pages at the old raster size.
-  }, [
-    source, documentId, pageIndex, groups,
-    width, height, gutter, scale, appearance,
-    generations.document, generations.layout,
-  ]);
-
-  // Release the frame's textures when the reader goes away, or they outlive it.
-  useEffect(() => {
-    const cache = cacheRef.current;
-    return () => {
-      if (cache === null) return;
-      for (const key of retainedRef.current) cache.release(key);
-      retainedRef.current = [];
-      cache.clear();
-    };
+  /**
+   * Republish the settled magnification.
+   *
+   * Only on settle, never per frame: the transform itself lives on the UI
+   * runtime and the shader reads it there. This exists so chrome can show a
+   * percentage and so the loader can re-raster at a density worth having.
+   */
+  /**
+   * Republish the settled magnification.
+   *
+   * Only on settle, never per frame: the transform itself lives on the UI
+   * runtime and the shader reads it there. This exists so chrome can show a
+   * percentage and so the loader can re-raster at a density worth having.
+   *
+   * Reads its inputs from a ref and takes no dependencies, because every
+   * gesture below is memoised against it. Depending on `plan.pages` -- a fresh
+   * array each render -- rebuilt all three gesture objects on every render,
+   * re-attaching the recognizers underneath a pinch that was still in progress
+   * and losing its end callback with them.
+   */
+  const zoomInputs = useRef({
+    onZoomChange, source, pages: plan.pages, spread: plan.spread,
+    width, height, gutter, screen, maxZoom,
+  });
+  zoomInputs.current = {
+    onZoomChange, source, pages: plan.pages, spread: plan.spread,
+    width, height, gutter, screen, maxZoom,
+  };
+  const settled = useCallback((scaleNow: number, x: number, y: number) => {
+    const it = zoomInputs.current;
+    it.onZoomChange?.({ scale: scaleNow, x, y });
+    const page = pagePlacement(it.source.getPageBox(it.pages[0]),
+      it.spread ? 'right' : 'center', it.width, it.height, it.gutter);
+    setDensity(rasterDensity(scaleNow, page.width * it.screen, page.height * it.screen,
+      MAX_TEXTURE_SIDE, it.maxZoom));
   }, []);
 
-  // The sheet covers both halves; each image sits in its own half.
-  const sheetW = spread ? leftFit.w + gutter + leafFit.w : leafFit.w;
-  const sheetH = Math.max(leftFit.h, leafFit.h);
-  const sheetX = spread ? leftTx : leafTx;
-  const sheetY = spread ? Math.min(leftTy, leafTy) : leafTy;
-  const halfW = spread ? leftFit.w + gutter / 2 : leafFit.w;
-  const leftRect = { x: 0, y: leftTy - sheetY, width: leftFit.w, height: leftFit.h };
-  const rightRect = {
-    x: sheetW - leafFit.w,
-    y: leafTy - sheetY,
-    width: leafFit.w,
-    height: leafFit.h,
-  };
-  const sheetRect = { x: 0, y: 0, width: sheetW, height: sheetH };
+  /**
+   * Report the settled magnification.
+   *
+   * Driven by watching the transform itself, not by a gesture's end callback.
+   * A pinch that is cancelled by the system, or whose end callback never runs
+   * -- which is what a release build does here, while the same code reports
+   * fine in debug -- would otherwise leave the reader showing 100% over a
+   * visibly magnified page.
+   *
+   * The UI runtime calls out only when the scale crosses a 5% step, and the JS
+   * side coalesces those into one update once movement stops. Nothing renders
+   * per frame.
+   */
+  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const moved = useCallback(() => {
+    if (settleTimer.current !== null) clearTimeout(settleTimer.current);
+    settleTimer.current = setTimeout(() => {
+      settleTimer.current = null;
+      // Read the transform itself for the final figure rather than the value
+      // from the last 5% step the reaction reported. Otherwise a pinch that
+      // stops at 107% shows 103% -- the step it last crossed. This is the one
+      // blocking cross-runtime read in the path; it happens once a gesture
+      // settles, never per frame.
+      const exact = view.value;
+      settled(exact.scale, exact.x, exact.y);
+    }, 140);
+  }, [settled, view]);
+  useEffect(() => () => {
+    if (settleTimer.current !== null) clearTimeout(settleTimer.current);
+  }, []);
 
-  // How far the finger must travel to turn the leaf all the way over.
-  const leafWidth = leafFit.w;
-
-  // -1 while turning back, so the same curl runs mirrored about the spine.
-  const dir = useSharedValue(1);
-  // True from the moment a turn commits until its pages are on screen, so a
-  // second swipe cannot commit again and skip a spread.
-  const turning = useSharedValue(false);
-
-  const uniforms = useDerivedValue(() => ({
-    progress: progress.value,
-    resolution: [sheetW, sheetH],
-    halfW,
-    dir: dir.value,
-  }));
-
-  // Drag maps travel across the leaf to curl progress; release either falls
-  // open or springs back. All of it stays on the UI thread.
-  const canGoBack = plan.previous !== null;
-  // One callback the worklet can capture. Passing a *conditional* function
-  // reference to scheduleOnRN leaves the gesture silently inert.
-  const commitDirection = useCallback(
-    (forward: boolean) => {
-      travelRef.current = forward ? 1 : -1;
-      const target = forward ? plan.next : plan.previous;
-      const next = target?.start ?? pageIndex;
-      if (next === pageIndex || next < 0 || next >= source.pageCount) {
-        // Nothing will load, so release the guard here or the reader locks.
-        turning.value = false;
-        return;
-      }
-      onPageIndexChange?.(next);
-    },
-    [onPageIndexChange, pageIndex, plan.next, plan.previous, source.pageCount, turning],
+  useAnimatedReaction(
+    () => Math.round(view.value.scale * 20),
+    (step, previous) => {
+      if (previous === null || step === previous) return;
+      scheduleOnRN(moved);
+    }, [moved],
   );
 
-  // Books turn both ways: dragging in from the outer edge turns forward,
-  // dragging out from the spine side pulls the previous leaf back.
-  const pan = Gesture.Pan()
-    // A tap is not a turn. Without an activation threshold the gesture begins
-    // on touch-down, and the begin handler used to zero `progress` -- tapping
-    // the page mid-settle snapped the curl flat.
-    .activeOffsetX([-8, 8])
-    .failOffsetY([-24, 24])
+  /**
+   * Claim the pane a gesture started on.
+   *
+   * Already inspecting a pane keeps it, so a stray finger cannot switch pages
+   * out from under a pinch. Starting on a different page switches to it fitted,
+   * because the transform is expressed against the old pane's rect and carrying
+   * it across would open the new page cropped to wherever the last one was.
+   */
+  const claimPane = useCallback((x: number, y: number) => {
+    'worklet';
+    const box = pane.value;
+    const inside = box.width > 0
+      && x >= box.x && x <= box.x + box.width
+      && y >= box.y && y <= box.y + box.height;
+    if (view.value.scale > ZOOMED && inside) return;
+    const current = frame.value;
+    const picked = current ? paneAt(current.panes, x) : null;
+    const next = picked ?? { x: 0, y: 0, width, height };
+    if (next.x !== box.x || next.width !== box.width) {
+      view.value = FIT;
+      viewStart.value = FIT;
+    }
+    pane.value = next;
+  }, [frame, pane, view, viewStart, width, height]);
+
+  const pinch = useMemo(() => Gesture.Pinch()
     .onStart((event) => {
-      'worklet';
-      if (turning.value) return;
-      const forward = rtl
-        ? event.x < sheetX + sheetW / 2
-        : event.x > sheetX + sheetW / 2;
+      claimPane(event.focalX, event.focalY);
+      // Focal data is only meaningful once the gesture has activated, so the
+      // anchor is captured here rather than in onBegin.
+      viewStart.value = view.value;
+      cancelAnimation(progress);
+      // A pinch during an uncommitted curl abandons the turn rather than
+      // magnifying a half-curled page and freezing that as the surface.
+      if (dragging.value && !turning.value) {
+        dragging.value = true;
+        turning.value = true;
+        progress.value = withTiming(0, { duration: 140 }, (done) => {
+          if (done) { turning.value = false; dragging.value = false; }
+        });
+      }
+    })
+    .onUpdate((event) => {
+      view.value = zoomAbout(viewStart.value, event.focalX, event.focalY,
+        viewStart.value.scale * event.scale, pane.value, zoomLimits);
+    })
+    .onFinalize(() => {
+      // onFinalize, not onEnd: a pinch cancelled by the system still left the
+      // page somewhere, and the readout must agree with what is on screen.
+      viewStart.value = view.value;
+    }), [claimPane, zoomLimits, view, viewStart, pane, progress, dragging, turning]);
+
+  const doubleTap = useMemo(() => Gesture.Tap()
+    .numberOfTaps(2)
+    .maxDuration(300)
+    .onEnd((event) => {
+      // Toggle: magnified goes back to fit, fitted goes to the target anchored
+      // on what was tapped, so the thing you pointed at is what you get.
+      claimPane(event.x, event.y);
+      const target = view.value.scale > ZOOMED ? 1 : doubleTapZoom;
+      const next = zoomAbout(view.value, event.x, event.y, target,
+        pane.value, zoomLimits);
+      if (reducedMotion) {
+        view.value = next;
+        viewStart.value = next;
+          return;
+      }
+      morphFrom.value = view.value;
+      morphTo.value = next;
+      morph.value = 0;
+      morph.value = withTiming(1, { duration: 220 }, (done) => {
+        if (!done) return;
+        // Land exactly on the target. The reaction below stops writing at
+        // t >= 1, so without this the transform keeps the last interpolated
+        // value -- a hair above 1 after a fit, which still reads as magnified
+        // and quietly turns every page-turn swipe into a 13px pan.
+        view.value = morphTo.value;
+        viewStart.value = morphTo.value;
+        });
+    }), [doubleTapZoom, claimPane, zoomLimits, reducedMotion, pane,
+      view, viewStart, morph, morphFrom, morphTo]);
+
+  const pan = useMemo(() => Gesture.Pan()
+    .activeOffsetX([-8, 8]).failOffsetY([-24, 24])
+    .onStart((event) => {
+      // Magnified, one finger inspects the page instead of turning it.
+      // Reaching an edge stops at the edge; it does not quietly become a turn.
+      //
+      // Only within the pane being inspected, though. A drag that starts on
+      // the facing page is about that page, and panning the magnified one
+      // from over there moves a page the finger is nowhere near.
+      const box = pane.value;
+      const onPane = event.x >= box.x && event.x <= box.x + box.width
+        && event.y >= box.y && event.y <= box.y + box.height;
+      if (view.value.scale > ZOOMED && onPane) {
+        panning.value = true;
+        panBase.value = view.value;
+        panFrom.value = { x: 0, y: 0, pointers: event.numberOfPointers };
+        return;
+      }
+      const current = frame.value;
+      if (!canTurn || !current || turning.value || current.generation !== requested.value) return;
+      const forward = current.rtl ? event.x < current.width / 2 : event.x > current.width / 2;
+      if ((forward ? current.next : current.previous) === null) return;
+      dragging.value = true;
       dir.value = forward ? 1 : -1;
       progress.value = 0;
     })
     .onUpdate((event) => {
-      'worklet';
-      if (turning.value) return;
+      if (panning.value) {
+        const pointers = event.numberOfPointers;
+        if (pointers !== panFrom.value.pointers) {
+          // A finger arrived or left. Rebase on the transform as it stands, or
+          // the page leaps by the whole translation accumulated so far.
+          panBase.value = view.value;
+          panFrom.value = { x: event.translationX, y: event.translationY, pointers };
+          return;
+        }
+        // Two fingers belong to the pinch, which is already moving the page by
+        // its focal point. Panning them as well would move it twice.
+        if (pointers > 1) return;
+        view.value = clampZoom({
+          scale: panBase.value.scale,
+          x: panBase.value.x + event.translationX - panFrom.value.x,
+          y: panBase.value.y + event.translationY - panFrom.value.y,
+        }, pane.value);
+        return;
+      }
+      const current = frame.value;
+      if (!dragging.value || !current || turning.value) return;
+      if (event.numberOfPointers > 1) {
+        // A second finger landed mid-drag: that is a pinch, not a turn. Give
+        // the page back rather than magnifying a half-curled leaf.
+        dragging.value = false;
+        turning.value = true;
+        progress.value = withTiming(0, { duration: 140 }, (done) => {
+          if (done) turning.value = false;
+        });
+        return;
+      }
       const forward = dir.value > 0;
-      if (forward ? !canAdvance : !canGoBack) return;
-      // Forward drags travel toward the spine, back drags away from it.
-      const travel = forward
-        ? rtl
-          ? event.translationX
-          : -event.translationX
-        : rtl
-          ? -event.translationX
-          : event.translationX;
-      // Across the leaf being turned, not half the sheet. Two pages side by
-      // side make those the same distance, but a single page shown alone IS
-      // the sheet, and dividing it in half turned the page in half the finger
-      // travel -- the curl ran away from the finger on one screen.
-      progress.value = Math.min(Math.max(travel / leafWidth, 0), 1);
+      const sign = (forward !== current.rtl) ? -1 : 1;
+      const leafWidth = forward ? current.forwardLeaf : current.backwardLeaf;
+      progress.value = Math.min(Math.max(event.translationX * sign / leafWidth, 0), 1);
     })
     .onEnd((event) => {
-      'worklet';
-      if (turning.value) return;
-      const forward = dir.value > 0;
-      if (forward ? !canAdvance : !canGoBack) return;
-      const away = forward
-        ? rtl
-          ? event.velocityX
-          : -event.velocityX
-        : rtl
-          ? -event.velocityX
-          : event.velocityX;
-      const flicked = Math.abs(away) > FLICK_VELOCITY;
-      const commit = flicked ? away > 0 : progress.value > COMMIT_AT;
-
-      // Continue at the speed the finger was moving. A fixed-duration tween
-      // starts from a dead stop no matter how hard the page was flicked, which
-      // is the hitch between letting go and the page falling open -- and at
-      // the other extreme it crawls when the page is already nearly over.
-      // Velocity is in pixels/s; the curl is in progress units, where 1 is
-      // half the sheet.
-      const velocity = Math.min(away / leafWidth, MAX_RELEASE_SPEED);
-      if (commit) {
-        turning.value = true;
-        // Clamped to the direction it is going. A drag dragged past the
-        // halfway mark and then let go while easing back releases with the
-        // velocity pointing the other way -- the page lurched backwards
-        // before falling open, and the turn committed late enough that the
-        // page counter ran ahead of the page.
-        progress.value = withSpring(
-          1,
-          {
-            velocity: Math.max(velocity, 0),
-            damping: 26,
-            stiffness: 260,
-            overshootClamping: true,
-          },
-          (finished) => {
-            'worklet';
-            if (finished) scheduleOnRN(commitDirection, forward);
-          },
-        );
-      } else {
-        progress.value = withSpring(0, {
-          velocity: Math.max(Math.min(velocity, 0), -MAX_RELEASE_SPEED),
-          damping: 22,
-          stiffness: 200,
-          overshootClamping: true,
-        });
+      if (panning.value) {
+        panning.value = false;
+        viewStart.value = view.value;
+          return;
       }
-    });
+      const current = frame.value;
+      if (!dragging.value || !current || turning.value) return;
+      dragging.value = false;
+      const forward = dir.value > 0;
+      const target = forward ? current.next : current.previous;
+      const away = event.velocityX * (forward !== current.rtl ? -1 : 1);
+      const shouldCommit = target !== null && (Math.abs(away) > FLICK_VELOCITY
+        ? away > 0 : progress.value > COMMIT_AT);
+      const leafWidth = forward ? current.forwardLeaf : current.backwardLeaf;
+      const velocity = Math.max(-MAX_RELEASE_SPEED, Math.min(away / leafWidth, MAX_RELEASE_SPEED));
+      turning.value = true;
+      progress.value = withSpring(shouldCommit ? 1 : 0, {
+        velocity: shouldCommit ? Math.max(velocity, 0) : Math.min(velocity, 0),
+        damping: shouldCommit ? 26 : 22, stiffness: shouldCommit ? 260 : 200,
+        overshootClamping: true,
+      }, (finished) => {
+        if (!finished) return;
+        if (shouldCommit && target !== null) {
+          scheduleOnRN(commit, current.generation, target, forward,
+            land(forward, target));
+        } else turning.value = false;
+      });
+    })
+    .onFinalize(() => {
+      if (panning.value) {
+        panning.value = false;
+        viewStart.value = view.value;
+        return;
+      }
+      if (!dragging.value) return;
+      dragging.value = false;
+      turning.value = true;
+      progress.value = withSpring(0, { damping: 22, stiffness: 200, overshootClamping: true },
+        (finished) => { if (finished) turning.value = false; });
+    }), [canTurn, commit, frame, view, viewStart, panning, pane,
+      panBase, panFrom, dragging, turning, dir, progress, requested]);
 
-  // Every shader slot must be a real image. A zero-sized ImageShader makes
-  // the whole runtime effect draw nothing, which is why the last spread of a
-  // book came out blank: past the final leaf there is no "to" spread, so two
-  // of the four slots had nothing to bind.
-  const half = (img: SkImage | null, rect: typeof leftRect) => (
-    <ImageShader
-      image={img ?? pages.fromRight!}
-      fit="fill"
-      rect={rect}
-      tx="clamp"
-      ty="clamp"
-    />
+  // Race, not Exclusive: a double tap and a drag cannot both be meant, but
+  // the pan needs 8px of travel to activate so a tap never reaches it -- and
+  // making the turn wait for the double-tap window to expire would put a
+  // visible delay on every page turn.
+  const gesture = useMemo(
+    () => Gesture.Race(doubleTap, Gesture.Simultaneous(pan, pinch)),
+    [doubleTap, pan, pinch],
   );
-
-  // The visible halves must be genuinely loaded. The destination halves may
-  // fall back to a real image because they are only seen mid-curl, but doing
-  // that for a visible half draws the same page twice.
-  const ready =
-    effect && pages.fromRight != null && (!spread || pages.fromLeft != null);
 
   return (
     <View style={{ width, height }}>
-      <GestureDetector gesture={pan}>
+      <GestureDetector gesture={gesture}>
         {/*
-          opaque puts the canvas on Android's SurfaceView path instead of a
-          TextureView. A TextureView hands every frame back through the view
-          hierarchy, so a full-screen reader pays a 2700x1800 composite on the
-          UI thread per frame -- measured at 44-79ms a frame during a turn
-          while the GPU itself was under 10ms, which is why the curl drew one
-          intermediate frame and then snapped. A book page is fully opaque, so
-          nothing is lost by saying so.
-        */}
-        <Canvas style={{ width, height }} opaque>
-          <Group transform={[{ translateX: sheetX }, { translateY: sheetY }]}>
-            {ready ? (
-              <Rect {...sheetRect}>
-                <Shader source={effect} uniforms={uniforms}>
-                  {half(pages.fromLeft, leftRect)}
-                  {half(pages.fromRight, rightRect)}
-                  {half(pages.toLeft, leftRect)}
-                  {half(pages.toRight, rightRect)}
-                  {half(pages.prevLeft, leftRect)}
-                  {half(pages.prevRight, rightRect)}
-                </Shader>
-              </Rect>
-            ) : (
-              pages.fromRight && (
-                <Image
-                  image={pages.fromRight}
-                  x={rightRect.x}
-                  y={rightRect.y}
-                  width={rightRect.width}
-                  height={rightRect.height}
-                  fit="fill"
-                />
-              )
-            )}
-          </Group>
+          * Not `opaque`. That prop picks the Android view underneath: opaque is
+          * a SurfaceView, which owns a compositor layer of its own, and a
+          * full-screen one of those costs the compositor enough per frame that
+          * every frame of a turn lands a vsync late and the whole animation
+          * halves to 30fps. Non-opaque is a TextureView, which HWUI draws as an
+          * ordinary quad inside the app's own window, and the same turn holds
+          * 60. The surface carries an alpha channel it does not need, but the
+          * Fill below paints every pixel anyway, so nothing shows through.
+          *
+          * Measured on a 2700x1800 Surface Duo: presented frame interval p50
+          * 33.2ms as a SurfaceView, 16.7ms as a TextureView, at identical
+          * resolution and with pixel-identical output. Shading fewer pixels
+          * does not fix it -- that was measured too, and only looked like a fix
+          * because compositing a smaller SurfaceView costs the compositor less.
+          */}
+        <Canvas style={{ width, height }}>
+          <Fill color={PAGE_BACKGROUND} />
+          <Fill paint={paint} />
         </Canvas>
       </GestureDetector>
     </View>

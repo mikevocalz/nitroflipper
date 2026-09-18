@@ -11,6 +11,8 @@ import {
   View,
 } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { BottomSheetModalProvider } from '@gorhom/bottom-sheet';
 import RNBlobUtil from 'react-native-blob-util';
 
 import {
@@ -49,6 +51,20 @@ const FORMAT: 'cbz' | 'pdf' | 'epub' = 'cbz';
 const packageName =
   RNBlobUtil.fs.dirs.CacheDir.split('/').filter(Boolean)[3] ?? '';
 
+/**
+ * Where the iOS bundle keeps the fixtures: the asset pipeline mirrors each
+ * file's path from the project root under `assets/`, so `src/assets/MMPR1.cbz`
+ * ships as `assets/src/assets/MMPR1.cbz`. Move the imports and this moves too.
+ */
+const IOS_ASSET_DIR = 'assets/src/assets';
+
+/** Cache name -> the file Gradle packaged into the APK's assets. */
+const FIXTURES_BY_NAME: Record<string, string> = {
+  'sample.cbz': 'MMPR1.cbz',
+  'sample.pdf': 'comic.pdf',
+  'sample.epub': 'book.epub',
+};
+
 const FIXTURES = {
   cbz: { asset: ltrAsset, name: 'sample.cbz' },
   pdf: { asset: pdfAsset, name: 'sample.pdf' },
@@ -66,13 +82,31 @@ const FIXTURES = {
  */
 async function materialise(asset: number, name: string): Promise<string> {
   const resolved = Image.resolveAssetSource(asset);
-  const uri = /^[a-z][a-z0-9+.-]*:/i.test(resolved.uri ?? '')
-    ? resolved.uri
-    : Platform.select({
-        android: `android.resource://${packageName}/raw/${resolved.uri}`,
-        default: resolved.uri,
-      });
+  // Metro serves the asset over http while the dev server is running; that URL
+  // is the fastest path and keeps Fast Refresh working on a changed fixture.
+  // Everything else -- every release build -- reads the copy Gradle packaged
+  // into the APK's assets, addressed with the one scheme ReactNativeBlobUtil
+  // actually understands for bundled files.
+  const served = /^https?:/i.test(resolved?.uri ?? '') ? resolved.uri : null;
+  const uri = served ?? Platform.select({
+    android: `bundle-assets://${FIXTURES_BY_NAME[name] ?? name}`,
+    // iOS keeps the file at its source path under assets/, where Gradle
+    // flattens to a basename. Checked against the built app: the fixtures sit
+    // at assets/src/assets/MMPR1.cbz and its two siblings. `bundle-assets://`
+    // cannot reach them either, because on iOS that goes through
+    // pathForResource:ofType:, which only searches the top of the bundle.
+    // MainBundleDir is the .app itself, so name the path they are actually at.
+    default: `${RNBlobUtil.fs.dirs.MainBundleDir}/${IOS_ASSET_DIR}/${
+      FIXTURES_BY_NAME[name] ?? name}`,
+  });
   const cachePath = `${RNBlobUtil.fs.dirs.CacheDir}/${name}`;
+  if (await RNBlobUtil.fs.exists(cachePath)) return cachePath;
+  if (served === null) {
+    // Already a file inside the package -- copy it straight out. Routing a
+    // bundled asset through the HTTP client would only re-encode it.
+    await RNBlobUtil.fs.cp(uri, cachePath);
+    return cachePath;
+  }
   const res = await RNBlobUtil.config({ fileCache: true }).fetch('GET', uri);
   const downloaded = res.path();
   if (!downloaded) {
@@ -176,50 +210,64 @@ export default function App(): React.JSX.Element {
   const pageIndex = useReaderStore((s) => s.pageIndex);
   const setPageIndex = useReaderStore((s) => s.setPageIndex);
   const turnRequest = useReaderStore((s) => s.turnRequest);
+  const zoomRequest = useReaderStore((s) => s.zoomRequest);
+  const setZoomScale = useReaderStore((s) => s.setZoomScale);
+  const reduceMotion = useReaderStore((s) => s.reduceMotion);
 
   return (
-    <GestureHandlerRootView style={styles.root}>
-      <View
-        style={styles.container}
-        onLayout={(e) => setSize(e.nativeEvent.layout)}
-      >
-        <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
-        {error ? (
-          <View style={styles.centered}>
-            <Text style={styles.error}>{error}</Text>
+    // The provider has to sit above everything, including the panels: they
+    // render in a Modal and still read their bottom inset from this context.
+    <SafeAreaProvider>
+      <GestureHandlerRootView style={styles.root}>
+        {/* Above the reader and below nothing else: panels present into this
+            scope, so it must outlive any one panel. */}
+        <BottomSheetModalProvider>
+          <View
+            style={styles.container}
+            onLayout={(e) => setSize(e.nativeEvent.layout)}
+          >
+            <StatusBar barStyle={isDarkMode ? 'light-content' : 'dark-content'} />
+            {error ? (
+              <View style={styles.centered}>
+                <Text style={styles.error}>{error}</Text>
+              </View>
+            ) : !source ? (
+              <View style={styles.centered}>
+                <ActivityIndicator size="large" />
+                <Text style={styles.label}>Loading {FORMAT.toUpperCase()}…</Text>
+              </View>
+            ) : (
+              <PageCurlView
+                source={source}
+                pageIndex={pageIndex}
+                onPageIndexChange={setPageIndex}
+                width={size.width}
+                height={size.height}
+                // No gutter: the pages meet at the spine, which lands on the
+                // Surface Duo fold — the seam becomes the book's gutter.
+                gutter={0}
+                onLayoutChange={useReaderStore.getState().setLayout}
+                turnRequest={turnRequest}
+                zoomRequest={zoomRequest}
+                zoom={{ max: 4, doubleTap: 2, reducedMotion: reduceMotion }}
+                onZoomChange={(z) => setZoomScale(z.scale)}
+                onSpreadVisible={useReaderStore.getState().setVisiblePages}
+                // A page that will not render is NOT a fatal document error.
+                // Routing it into `error` unmounted the reader and replaced the
+                // whole book with a red string the reader could not get out of.
+                // It is a transient notice over a still-usable reader.
+                onPageLoadError={(e) =>
+                  useReaderStore.getState().setNotice(String(e))
+                }
+              />
+            )}
+            {source && <ReaderChrome />}
+            {source && <ActivePanel />}
+            {source && <Notice />}
           </View>
-        ) : !source ? (
-          <View style={styles.centered}>
-            <ActivityIndicator size="large" />
-            <Text style={styles.label}>Loading {FORMAT.toUpperCase()}…</Text>
-          </View>
-        ) : (
-          <PageCurlView
-            source={source}
-            pageIndex={pageIndex}
-            onPageIndexChange={setPageIndex}
-            width={size.width}
-            height={size.height}
-            // No gutter: the pages meet at the spine, which lands on the
-            // Surface Duo fold — the seam becomes the book's gutter.
-            gutter={0}
-            onLayoutChange={useReaderStore.getState().setLayout}
-            turnRequest={turnRequest}
-            onSpreadVisible={useReaderStore.getState().setVisiblePages}
-            // A page that will not render is NOT a fatal document error.
-            // Routing it into `error` unmounted the reader and replaced the
-            // whole book with a red string the reader could not get out of.
-            // It is a transient notice over a still-usable reader.
-            onPageLoadError={(e) =>
-              useReaderStore.getState().setNotice(String(e))
-            }
-          />
-        )}
-        {source && <ReaderChrome />}
-        {source && <ActivePanel />}
-        {source && <Notice />}
-      </View>
-    </GestureHandlerRootView>
+        </BottomSheetModalProvider>
+      </GestureHandlerRootView>
+    </SafeAreaProvider>
   );
 }
 

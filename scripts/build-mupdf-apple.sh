@@ -30,12 +30,20 @@ if ! command -v cmake >/dev/null 2>&1; then
   exit 1
 fi
 
-# Rebuild only when an input is newer than the output. `find -newer` on the two
+# Rebuild only when an input is newer than the output. `find -newer` on the few
 # files that actually determine the build keeps this honest without a full
 # dependency graph.
+#
+# This script is one of those files. It decides what gets linked and what the
+# symbols are called, so a change here has to invalidate the output the same way
+# a change to the CMake inputs does. Leaving it out meant anyone holding an
+# xcframework built before a fix was told it was up to date and kept the old
+# one -- which is how the libjpeg symbols stayed visible after the build was
+# taught to hide them.
 if [ -d "$XCFRAMEWORK" ]; then
   NEWER=$(find "$PACKAGE_ROOT/third_party/mupdf/CMakeLists.txt" \
                "$PACKAGE_ROOT/third_party/mupdf/mupdf_sources.cmake" \
+               "${BASH_SOURCE[0]}" \
                -newer "$XCFRAMEWORK/Info.plist" 2>/dev/null | head -1 || true)
   if [ -z "$NEWER" ]; then
     echo "mupdf.xcframework is up to date"
@@ -70,6 +78,54 @@ build_slice() {
   # takes one library, so merge them.
   libtool -static -o "$dir/libmupdf-combined.a" \
     "$dir/libmupdf.a" "$dir/libmupdf_thirdparty.a" 2>/dev/null
+
+  hide_libjpeg "$dir/libmupdf-combined.a" "$2" "$3"
+}
+
+# Keep mupdf's libjpeg to itself.
+#
+# mupdf bundles its own libjpeg and checks the version at runtime. react-native-
+# skia ships another one in libskia.a, and with both archives in a link the
+# loader can answer mupdf's calls with skia's copy. mupdf then reads a version
+# it was not compiled against -- "Wrong JPEG library version: library is 100,
+# caller expects 62" -- and refuses to decode, so every JPEG page in a comic
+# renders blank while the turn animates perfectly over the top of nothing.
+#
+# Making the symbols private extern leaves mupdf resolving its own copy at
+# static-link time and takes them out of the cross-archive namespace, so skia
+# keeps decoding with its own. The pattern is anchored on libjpeg's own naming;
+# mujs is the reason it cannot be a bare `_j` (that would swallow _jsU_*).
+hide_libjpeg() {
+  local lib="$1" sdk="$2" archs="$3"
+  local syms="$lib.jpegsyms" merged="$lib.merged.o"
+  local jpeg='^_(jpeg_|jinit_|jsimd_|jdiv_round_up|jzero_far|jcopy_|jround_up|jaritab|jconst_)'
+
+  nm -gU "$lib" 2>/dev/null | awk '$2=="T"||$2=="D"||$2=="S"||$2=="B"{print $3}' \
+    | grep -E "$jpeg" | sort -u > "$syms"
+  [ -s "$syms" ] || return 0
+
+  local version
+  version=$(xcrun --sdk "$sdk" --show-sdk-version)
+  local platform=ios
+  [ "$sdk" = iphonesimulator ] && platform=ios-simulator
+
+  local arch first
+  first=$(echo "$archs" | tr ';' ' ' | awk '{print $1}')
+  for arch in $(echo "$archs" | tr ';' ' '); do
+    xcrun ld -r -arch "$arch" -all_load \
+      -platform_version "$platform" "$DEPLOYMENT_TARGET" "$version" \
+      -unexported_symbols_list "$syms" \
+      -o "$merged.$arch" "$lib" || return 1
+  done
+
+  if [ "$(echo "$archs" | tr ';' ' ' | wc -w)" -gt 1 ]; then
+    lipo -create -output "$merged" "$merged".* && rm -f "$merged".*
+  else
+    mv "$merged.$first" "$merged"
+  fi
+
+  libtool -static -o "$lib" "$merged"
+  rm -f "$merged" "$syms"
 }
 
 mkdir -p "$BUILD_ROOT" "$OUTPUT_DIR"

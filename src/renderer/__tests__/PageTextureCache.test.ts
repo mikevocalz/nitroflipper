@@ -100,6 +100,31 @@ describe('byte budget', () => {
 });
 
 describe('retain and release', () => {
+  it('pins an oversize decode before insertion can evict it', () => {
+    const cache = new PageTextureCache({ budgetBytes: 100 });
+    const image = fakeImage();
+    assert.equal(cache.setAndRetain(key(), image, 400), image);
+    assert.equal(image.disposed, false);
+    assert.equal(cache.retain(key()), image);
+    cache.release(key());
+    assert.equal(image.disposed, false);
+    cache.release(key());
+    assert.equal(image.disposed, true);
+  });
+
+  it('retains the winning entry when an oversize duplicate arrives', () => {
+    const cache = new PageTextureCache({ budgetBytes: 0 });
+    const first = fakeImage();
+    const loser = fakeImage();
+    cache.setAndRetain(key(), first, 400);
+    assert.equal(cache.setAndRetain(key(), loser, 400), first);
+    assert.equal(first.disposed, false);
+    assert.equal(loser.disposed, true);
+    cache.release(key());
+    assert.equal(first.disposed, false);
+    cache.release(key());
+    assert.equal(first.disposed, true);
+  });
   it('does not dispose an image the frame is still drawing', () => {
     const cache = new PageTextureCache({ budgetBytes: 400 });
     const first = fakeImage();
