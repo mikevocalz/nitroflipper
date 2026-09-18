@@ -86,9 +86,30 @@ in the first place.
 Work that reduces per-frame cost in the app -- shader, allocations, mapper
 topology -- cannot fix this, and three such changes have now demonstrated that
 by measuring flat. The trigger is a compositor deadline miss and the mechanism
-is a three-slot queue that cannot recover from one, so a fix has to either stop
-the layer being client-composited, or give the queue the headroom to drain
-after a miss.
+is a three-slot queue that cannot recover from one.
+
+Giving the queue more headroom is not available. `BLASTBufferQueue`'s
+constructor sets `setMaxDequeuedBufferCount(2)` as a literal, takes the
+acquired count from SurfaceFlinger over binder, and calls
+`setDequeueTimeout(int64 max)`, so the wait never expires. There is no app-
+reachable setter -- `android.graphics.BLASTBufferQueue` and `ViewRootImpl` are
+hidden and the NDK exposes no equivalent. That leaves stopping the layer being
+client-composited, or skipping a present so the queue drains by itself.
+
+Making the window opaque is the cheap version of the first, and the theme is
+what prevents it: `windowTranslucentStatus` and `windowTranslucentNavigation`
+force the window format to translucent. Removing them does make the layer
+report `isOpaque=true`. It also costs the reader its full height -- the page
+art stops at the system bars -- because those flags are what make the window
+draw behind them, whatever `setDecorFitsSystemWindows(false)` suggests. So this
+has to come with the insets handled on the React side, not as a theme edit, and
+is not done.
+
+A note on measuring the next attempt: the layout shift moved the page control,
+and turns driven by fixed tap coordinates silently stopped turning pages while
+still producing a plausible-looking trace. Take coordinates from the element
+tree, and check the page label actually advanced before reading any cadence
+number.
 
 Two things this trace cannot answer, each needing a source this device does not
 register: why that SurfaceFlinger frame missed its GPU deadline needs
