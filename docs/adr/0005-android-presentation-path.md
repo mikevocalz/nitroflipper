@@ -96,14 +96,30 @@ reachable setter -- `android.graphics.BLASTBufferQueue` and `ViewRootImpl` are
 hidden and the NDK exposes no equivalent. That leaves stopping the layer being
 client-composited, or skipping a present so the queue drains by itself.
 
-Making the window opaque is the cheap version of the first, and the theme is
-what prevents it: `windowTranslucentStatus` and `windowTranslucentNavigation`
-force the window format to translucent. Removing them does make the layer
-report `isOpaque=true`. It also costs the reader its full height -- the page
-art stops at the system bars -- because those flags are what make the window
-draw behind them, whatever `setDecorFitsSystemWindows(false)` suggests. So this
-has to come with the insets handled on the React side, not as a theme edit, and
-is not done.
+Making the window opaque was tried and does not work. `setFormat(OPAQUE)` in
+`MainActivity.onCreate` overrides the theme's translucent format while leaving
+the theme flags in place, so the layer reports `isOpaque=true` and the reader
+keeps its full height. Measured against a control build that differed by that
+one line, on release, eight turns each, both runs confirmed to have actually
+turned pages:
+
+| | control | opaque |
+|---|---|---|
+| Late Present | 97.5% | 95.2% |
+| on_time_finish = 1 | 55.0% | 59.5% |
+| Buffer Stuffing, any | 32.5% | 42.8% |
+| SurfaceFlinger GPU Deadline Missed, any | 45.0% | 47.6% |
+
+Small, mixed in direction, and inside what forty frames can resolve. The layer
+being opaque did not stop SurfaceFlinger missing its GPU deadline, so opacity
+was not what kept the layer off an overlay. Reverted. Whatever the real
+disqualifier is, reading it needs the composer HAL's per-layer
+composition-change reasons, which this device does not expose.
+
+Note also that the release build is much worse than the debug build the
+original trace came from: 97.5% Late Present against 60.4%, and 55% finishing
+on time against 83%. The debug measurements in this document describe a build
+nobody ships, and the release figures above are the ones to beat.
 
 A note on measuring the next attempt: the layout shift moved the page control,
 and turns driven by fixed tap coordinates silently stopped turning pages while
