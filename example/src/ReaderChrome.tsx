@@ -1,7 +1,7 @@
 import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { MuPDFSource } from 'nitro-flipper';
+import { MuPDFSource, zoomPercent } from 'nitro-flipper';
 
 import { useReaderStore } from './readerStore';
 import { STRINGS } from './strings';
@@ -28,6 +28,8 @@ export function ReaderChrome() {
   const step = useReaderStore((s) => s.step);
   const spread = useReaderStore((s) => s.spread);
   const setPanel = useReaderStore((s) => s.setPanel);
+  const zoomScale = useReaderStore((s) => s.zoomScale);
+  const requestZoom = useReaderStore((s) => s.requestZoom);
   const addBookmark = useReaderStore((s) => s.addBookmark);
   const bookmarks = useReaderStore((s) => s.bookmarks);
 
@@ -73,6 +75,36 @@ export function ReaderChrome() {
     <View style={styles.bar} pointerEvents="box-none">
       {/* Panel row sits above the pill so the page-turn control keeps the
           easiest position for the thumb. */}
+      {/* Magnification sits in its own row above the panel affordances: it is
+          a reading control like the page pill, not navigation, and it only
+          earns its space once there is something to say about it. */}
+      <View style={styles.actions}>
+        <ChromeButton
+          label={STRINGS.zoom.out}
+          glyph="−"
+          onPress={() => requestZoom('out')}
+          disabled={zoomScale <= 1.01}
+        />
+        <Pressable
+          onPress={() => requestZoom('fit')}
+          disabled={zoomScale <= 1.01}
+          style={styles.zoomReadout}
+          accessibilityRole="button"
+          accessibilityLabel={STRINGS.zoom.fitTo(zoomPercent(zoomScale))}
+          accessibilityHint={STRINGS.zoom.hint}
+          hitSlop={SPACE.sm}
+        >
+          <Text style={[TYPE.caption, { color: '#fff' }]}>
+            {zoomPercent(zoomScale)}%
+          </Text>
+        </Pressable>
+        <ChromeButton
+          label={STRINGS.zoom.in}
+          glyph="+"
+          onPress={() => requestZoom('in')}
+          disabled={zoomScale >= 4}
+        />
+      </View>
       <View style={styles.actions}>
         {/* Contents, search and bookmarks need a document model. A CBZ is a
             list of images with no outline, no text and no locator, so offering
@@ -155,21 +187,27 @@ function ChromeButton({
   glyph,
   onPress,
   onLongPress,
+  disabled = false,
 }: {
   label: string;
   glyph: string;
   onPress: () => void;
   onLongPress?: () => void;
+  disabled?: boolean;
 }) {
   return (
     <Pressable
       onPress={onPress}
       onLongPress={onLongPress}
+      disabled={disabled}
       style={styles.action}
       accessibilityRole="button"
       accessibilityLabel={label}
+      // Dimmed AND announced: a control that only looks unavailable tells a
+      // screen-reader user nothing.
+      accessibilityState={{ disabled }}
     >
-      <Text style={styles.actionGlyph}>{glyph}</Text>
+      <Text style={[styles.actionGlyph, disabled && styles.actionDisabled]}>{glyph}</Text>
     </Pressable>
   );
 }
@@ -201,6 +239,15 @@ const styles = StyleSheet.create({
   actionGlyph: {
     color: '#fff',
     fontSize: 18,
+  },
+  actionDisabled: {
+    opacity: 0.35,
+  },
+  zoomReadout: {
+    minWidth: 52,
+    minHeight: HIT_SLOP_MIN,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   pill: {
     flexDirection: 'row',

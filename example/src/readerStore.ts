@@ -41,6 +41,9 @@ interface ReaderState {
   spread: boolean;
   /** Bumped to ask the reader to animate a turn; id changes every request. */
   turnRequest: { dir: number; id: number };
+  /** Settled magnification. 1 is the fitted page, which the chrome shows as 100%. */
+  zoomScale: number;
+  zoomRequest: { to: number | 'in' | 'out' | 'fit'; id: number };
 
   panel: Panel;
   theme: ThemeName;
@@ -78,6 +81,8 @@ interface ReaderState {
   toggleChrome: () => void;
   setLayout: (info: { step: number; spread: boolean }) => void;
   requestTurn: (dir: number) => void;
+  setZoomScale: (scale: number) => void;
+  requestZoom: (to: number | 'in' | 'out' | 'fit') => void;
 
   setPanel: (panel: Panel) => void;
   setTheme: (theme: ThemeName) => void;
@@ -100,6 +105,8 @@ export const useReaderStore = create<ReaderState>()((set) => ({
   step: 1,
   spread: false,
   turnRequest: { dir: 1, id: 0 },
+  zoomScale: 1,
+  zoomRequest: { to: 'fit', id: 0 },
 
   panel: 'none',
   theme: 'light',
@@ -119,6 +126,11 @@ export const useReaderStore = create<ReaderState>()((set) => ({
   setLayout: ({ step, spread }) => set({ step, spread }),
   requestTurn: (dir) =>
     set((s) => ({ turnRequest: { dir, id: s.turnRequest.id + 1 } })),
+  // Reported by the reader once a pinch settles, not per frame -- the
+  // transform lives on the UI runtime and never round-trips through React.
+  setZoomScale: (zoomScale) => set({ zoomScale }),
+  requestZoom: (to) =>
+    set((s) => ({ zoomRequest: { to, id: s.zoomRequest.id + 1 } })),
 
   setPanel: (panel) => set({ panel }),
   setTheme: (theme) => set({ theme }),

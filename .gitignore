@@ -26,3 +26,6 @@ e2e-artifacts/
 build-android/
 build-ios-sim/
 build-ios-device/
+
+# Python bytecode from the device scripts
+__pycache__/

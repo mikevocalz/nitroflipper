@@ -12,6 +12,38 @@ function groupsFor(pageCount: number, wide: number[] = [], allowSpread = true) {
   return buildSpreadGroups(pageCount, (i) => !wide.includes(i), allowSpread);
 }
 
+describe('pages the document says stand alone', () => {
+  it('opens on the cover alone, then pairs the rest like a book', () => {
+    // A cover marked centre, everything after it an ordinary page.
+    const groups = buildSpreadGroups(7, () => true, true, (i) => i === 0);
+    assert.deepEqual(groups, [
+      { start: 0, size: 1 },
+      { start: 1, size: 2 },
+      { start: 3, size: 2 },
+      { start: 5, size: 2 },
+    ]);
+  });
+
+  it('never pairs a standalone page with the one before it', () => {
+    // Page 3 is a drawing across both leaves: it is its own group, and the
+    // pages after it resume pairing on the other parity.
+    const groups = buildSpreadGroups(6, () => true, true, (i) => i === 3);
+    assert.deepEqual(groups, [
+      { start: 0, size: 2 },
+      { start: 2, size: 1 },
+      { start: 3, size: 1 },
+      { start: 4, size: 2 },
+    ]);
+  });
+
+  it('pairs as before when the document says nothing', () => {
+    assert.deepEqual(
+      buildSpreadGroups(4, () => true, true),
+      buildSpreadGroups(4, () => true, true, () => false),
+    );
+  });
+});
+
 /** Walk from the first group to the last, collecting what is shown. */
 function walkForward(groups: readonly SpreadGroup[]): number[][] {
   const seen: number[][] = [];

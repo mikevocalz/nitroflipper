@@ -1,13 +1,20 @@
 import React from 'react';
 import {
   AccessibilityInfo,
-  Modal,
+  BackHandler,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
+import {
+  BottomSheetBackdrop,
+  BottomSheetModal,
+  BottomSheetScrollView,
+  type BottomSheetBackdropProps,
+} from '@gorhom/bottom-sheet';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useReaderStore } from './readerStore';
 import { HIT_SLOP_MIN, RADIUS, SHEET_MAX_WIDTH, SPACE, THEMES, TYPE } from './theme';
@@ -21,72 +28,134 @@ interface SheetProps {
 }
 
 /**
+ * Two stops rather than a measured content height.
+ *
+ * Appearance is four rows and Contents can be two hundred, so one height
+ * cannot serve both: the panel opens at the lower stop and the grabber pulls
+ * it to the upper one. That also makes the grabber honest -- it now drags, and
+ * dragging past the bottom closes, which a fixed-height panel only pretended
+ * to offer.
+ */
+const SNAP_POINTS = ['48%', '88%'];
+
+/**
  * The one container every reader panel uses.
  *
- * A real Modal rather than an absolutely positioned View, so the platform
- * handles the focus trap and the Android back button. Rolling that by hand is
- * how a panel ends up reachable by a screen reader while the page behind it is
- * still focusable.
+ * A Gorhom modal rather than a platform Modal: the reader underneath is a
+ * Skia surface driven by gesture-handler, and a sheet that does not share that
+ * gesture system either steals the page-turn pan or gets stolen from. Gorhom
+ * arbitrates with the same handlers, so dragging the sheet cannot turn a page.
+ *
+ * Mounted only while a panel is open -- `ActivePanel` holds one panel at a
+ * time, so there is no path to two sheets stacking on one another.
  */
 export function Sheet({ title, onClose, children, header }: SheetProps) {
   const themeName = useReaderStore((s) => s.theme);
   const theme = THEMES[themeName];
+  const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
+  const sheet = React.useRef<BottomSheetModal>(null);
 
-  // Announce the panel on open. Without this a screen-reader user gets focus
-  // moved with no idea what opened.
+  // Centred at 768dp, as a horizontal margin on the *hosting container*.
+  //
+  // Not `width`/`maxWidth`: Gorhom lays the sheet out absolutely and composes
+  // the caller's style FIRST -- `[style, styles.container, ...]` in
+  // BottomSheetBody -- so its own `left: 0, right: 0` overrides any inset and a
+  // width cap just fights the absolute box. The sheet then presents off-screen,
+  // reporting index 0 while drawing nothing. Margins are not in either of those
+  // style lists, so they survive and narrow the box as intended.
+  //
+  // Not the `style` prop: that reaches BottomSheetBody, and on Gesture Handler
+  // 3.x a margin there clips the sheet to a ~170dp strip in the middle while
+  // the accessibility tree still reports the full 768dp -- the layout is right
+  // and only the paint is wrong, which is why it reads as a blank white box.
+  // `containerStyle` is correct on both 2.x and 3.x.
+  //
+  // Read from the window each render, so a fold, unfold or rotation re-centres
+  // it rather than keeping a gutter measured against the old screen.
+  const gutter = Math.max(0, (width - SHEET_MAX_WIDTH) / 2);
+
+  // Present on mount and announce. Without the announcement a screen-reader
+  // user gets focus moved with no idea what opened.
   React.useEffect(() => {
+    sheet.current?.present();
     AccessibilityInfo.announceForAccessibility(title);
   }, [title]);
 
+  // Every exit goes through dismiss() so the panel animates out. Calling
+  // onClose directly would unmount it mid-slide.
+  const close = React.useCallback(() => sheet.current?.dismiss(), []);
+
+  // Gorhom does not claim the hardware back button -- unlike the platform
+  // Modal this replaced, which got it from onRequestClose. Without this, back
+  // on Android closes the whole app while a panel is open.
+  React.useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      close();
+      return true;
+    });
+    return () => sub.remove();
+  }, [close]);
+
+  const backdrop = React.useCallback(
+    (props: BottomSheetBackdropProps) => (
+      <BottomSheetBackdrop
+        {...props}
+        appearsOnIndex={0}
+        disappearsOnIndex={-1}
+        pressBehavior="close"
+        accessibilityLabel={`Close ${title}`}
+      />
+    ),
+    [title],
+  );
+
   return (
-    <Modal
-      visible
-      transparent
-      animationType="slide"
-      onRequestClose={onClose}
-      accessibilityViewIsModal
+    <BottomSheetModal
+      ref={sheet}
+      snapPoints={SNAP_POINTS}
+      index={0}
+      enableDynamicSizing={false}
+      onDismiss={onClose}
+      containerStyle={{ marginHorizontal: gutter }}
+      backdropComponent={backdrop}
+      // A search field in the header must stay above the keyboard, and the
+      // list position it was scrolled to has to survive the resize.
+      keyboardBehavior="interactive"
+      keyboardBlurBehavior="restore"
+      android_keyboardInputMode="adjustResize"
+      backgroundStyle={[styles.surface, { backgroundColor: theme.surface }]}
+      handleIndicatorStyle={{ backgroundColor: theme.divider }}
+      accessibilityLabel={title}
     >
-      {/* Modal's own content container has no height of its own, so an
-          absoluteFill child resolves against zero and collapses. This flex
-          root is what gives the scrim and the sheet something to fill. */}
-      <View style={styles.root}>
-        {/* Tapping the scrim closes, which is the gesture people try first. */}
+      <View style={styles.titleRow}>
+        <Text style={[TYPE.title, { color: theme.text }]} accessibilityRole="header">
+          {title}
+        </Text>
         <Pressable
-          style={[styles.scrim, { backgroundColor: theme.scrim }]}
-          onPress={onClose}
+          onPress={close}
+          style={styles.close}
           accessibilityRole="button"
           accessibilityLabel={`Close ${title}`}
-        />
-        <View style={[styles.sheet, { backgroundColor: theme.surface }]}>
-          <View style={[styles.grabber, { backgroundColor: theme.divider }]} />
-        <View style={styles.titleRow}>
-          <Text
-            style={[TYPE.title, { color: theme.text }]}
-            accessibilityRole="header"
-          >
-            {title}
-          </Text>
-          <Pressable
-            onPress={onClose}
-            style={styles.close}
-            accessibilityRole="button"
-            accessibilityLabel={`Close ${title}`}
-            hitSlop={SPACE.md}
-          >
-            <Text style={[TYPE.title, { color: theme.textMuted }]}>✕</Text>
-          </Pressable>
-        </View>
-        {header}
-        <ScrollView
-          style={styles.body}
-          contentContainerStyle={styles.bodyContent}
-          keyboardShouldPersistTaps="handled"
+          hitSlop={SPACE.md}
         >
-          {children}
-        </ScrollView>
-        </View>
+          <Text style={[TYPE.title, { color: theme.textMuted }]}>✕</Text>
+        </Pressable>
       </View>
-    </Modal>
+      {header}
+      <BottomSheetScrollView
+        style={styles.body}
+        contentContainerStyle={[
+          styles.bodyContent,
+          // Clear of the home indicator, so the last row in the panel is not
+          // sitting under the system gesture bar.
+          { paddingBottom: insets.bottom + SPACE.lg },
+        ]}
+        keyboardShouldPersistTaps="handled"
+      >
+        {children}
+      </BottomSheetScrollView>
+    </BottomSheetModal>
   );
 }
 
@@ -108,46 +177,24 @@ export function EmptyState({ text, hint }: { text: string; hint?: string }) {
 }
 
 const styles = StyleSheet.create({
-  scrim: {
-    ...StyleSheet.absoluteFillObject,
-  },
-  root: {
-    flex: 1,
-    // Row container, so the axes read: justifyContent places the sheet
-    // horizontally, alignItems sizes it vertically. Putting the horizontal
-    // intent on alignItems instead shrinks the sheet to its content height,
-    // which collapses it to a strip across the top.
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'stretch',
-  },
-  sheet: {
-    // Full height, from alignItems: 'stretch' above. No flex and no absolute
-    // positioning: flex would grow along the row and defeat the width cap,
-    // and an absolute box inside the modal has nothing to resolve against.
-    //
-    // Centred at 768dp. On this dual-screen the hinge runs down the middle at
-    // 540dp, so a centred sheet does straddle the fold -- a deliberate choice
-    // to keep one layout everywhere rather than a dual-screen special case.
-    width: '100%',
-    maxWidth: SHEET_MAX_WIDTH,
+  surface: {
     borderTopLeftRadius: RADIUS.lg,
     borderTopRightRadius: RADIUS.lg,
-    paddingBottom: SPACE.xl,
-  },
-  grabber: {
-    width: 36,
-    height: 4,
-    borderRadius: RADIUS.pill,
-    alignSelf: 'center',
-    marginTop: SPACE.md,
+    // The reader draws paper lifting off paper, and the panel is the same
+    // gesture at a larger scale -- so it gets the curl's restrained contact
+    // shadow rather than a stock elevation ramp.
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.18,
+    shadowRadius: 16,
+    elevation: 16,
   },
   titleRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: SPACE.lg,
-    paddingTop: SPACE.md,
+    paddingTop: SPACE.sm,
     paddingBottom: SPACE.sm,
   },
   close: {
@@ -161,7 +208,6 @@ const styles = StyleSheet.create({
   },
   bodyContent: {
     paddingHorizontal: SPACE.lg,
-    paddingBottom: SPACE.lg,
   },
   empty: {
     paddingVertical: SPACE.xxl,

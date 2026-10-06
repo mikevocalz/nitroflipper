@@ -36,14 +36,28 @@ this turn finish", not as turn latency; `frame_pace.py` measures the turn.
 ## Frame pacing: does the curl hold the panel's rate
 
 ```bash
-python3 scripts/e2e/frame_pace.py --serial <adb-serial> --turns 6 --idle-ms 120
+python3 scripts/e2e/frame_pace.py --serial <adb-serial> --turns 6
 ```
 
 Reads present timestamps straight from SurfaceFlinger, because neither
 alternative is honest here: `dumpsys gfxinfo` cannot see a Skia canvas on the
 SurfaceView path, and `screenrecord` drops frames of its own on a panel this
-size. Exit status is non-zero when the median gap is worse than the panel's
-vsync.
+size. Each turn is sampled separately, excluding timestamps already present
+before its input. Only gaps between turns are excluded; a 600 ms stall inside
+a turn remains in the result. Reading latency data does not drain its history.
+
+Every turn must have at least eight presented frames, p95 within 1.4 panel
+intervals, at most 5% late intervals, and no interval over 50 ms. A good median
+alone cannot pass. `--min-frames`, `--max-missed-pct`, and `--max-gap-ms` can set
+an explicit device budget. A potentially wrapped latency buffer fails the run.
+If multiple SurfaceView layers exist, select the canvas with `--layer`.
+
+The observation window includes late texture updates after the animation,
+which can conservatively fail the pacing budget. SurfaceFlinger timestamps
+alone cannot distinguish those updates from a stalled animation, or measure
+input-to-first-frame delay. Inspect failures on the device and use the landing
+soak alongside this test. Neither test establishes that intermediate frames
+are free of visual artifacts.
 
 `adb shell input swipe` emits only a handful of move events, so a swipe-driven
 run partly measures the input generator. To see the animation's own cadence,
@@ -53,7 +67,11 @@ turn the page through the page control instead:
 python3 scripts/e2e/frame_pace.py --serial <adb-serial> --tap 0.559,0.933
 ```
 
-## Measured on a Surface Duo (spanned, 2700x1800, 60Hz panel)
+## Earlier Surface Duo measurements (spanned, 2700x1800, 60Hz panel)
+
+These predate the atomic paint handoff and the stricter pacing gate above.
+They are historical results, not validation of the current renderer. The old
+median-only gate filtered out long gaps and could pass a visibly stalled turn.
 
 | | before | after |
 |---|---|---|
@@ -62,3 +80,19 @@ python3 scripts/e2e/frame_pace.py --serial <adb-serial> --tap 0.559,0.933
 | frames presented per turn | 8 | ~21 |
 | median frame gap | 33.3ms (30fps) | 16.7ms (60fps) |
 | blank landings, 34-turn soak | 3 | 0 |
+
+## Validating the paint handoff
+
+`npm run test:ts` includes CPU Skia pixel tests for the production curl shader:
+the end of a turn and its replacement flat page must match in both directions,
+with LTR/RTL and transitions between single pages and spreads. Cache tests cover
+images larger than the cache budget and replacement-frame lifetimes.
+`python3 -m unittest discover -s scripts/e2e -p 'test_*.py'` checks the pacing gate.
+
+Device acceptance remains necessary: use an optimized build, run both scripts
+in single-screen and spanned modes, then exercise rapid reversals, cancelled
+drags, first/last pages, and folds during a turn. Check intermediate frames for
+blinks and confirm graphics memory plateaus over repeated laps. Record p95,
+maximum gap and late-interval rate per turn, not just median FPS. Native paint
+creation, cross-runtime resource ownership and SurfaceView presentation need
+this device check even when CPU rendering tests pass.

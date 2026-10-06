@@ -4,9 +4,11 @@ import {
   Pressable,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
+// Gorhom's input, not the platform one: it reports focus to the sheet so the
+// panel lifts above the keyboard instead of the field disappearing behind it.
+import { BottomSheetTextInput } from '@gorhom/bottom-sheet';
 
 import { MuPDFSource, type SearchResult } from 'nitro-flipper';
 
@@ -53,7 +55,7 @@ export function SearchPanel() {
 
   const header = (
     <View style={styles.header}>
-      <TextInput
+      <BottomSheetTextInput
         value={term}
         onChangeText={setTerm}
         onSubmitEditing={run}

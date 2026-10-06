@@ -65,11 +65,23 @@ def adb(serial: str, *args: str, binary: bool = False):
     return out if binary else out.decode("utf-8", "replace")
 
 
-def grab(serial: str, scale: int = 4) -> Image.Image:
-    """One frame, downscaled. Full res costs ~0.4s per poll and buys nothing."""
-    png = adb(serial, "exec-out", "screencap", "-p", binary=True)
-    image = Image.open(io.BytesIO(png)).convert("L")
-    return image.reduce(scale)
+def grab(serial: str, scale: int = 4, attempts: int = 3) -> Image.Image:
+    """
+    One frame, downscaled. Full res costs ~0.4s per poll and buys nothing.
+
+    A screencap occasionally comes back short over adb, which decodes as a
+    truncated PNG. That is a transport hiccup, not a finding about the reader,
+    so take the picture again rather than failing the run.
+    """
+    for attempt in range(attempts):
+        try:
+            png = adb(serial, "exec-out", "screencap", "-p", binary=True)
+            return Image.open(io.BytesIO(png)).convert("L").reduce(scale)
+        except (OSError, subprocess.CalledProcessError):
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.2)
+    raise AssertionError("unreachable")
 
 
 def halves(frame: Image.Image) -> tuple[Image.Image, Image.Image]:

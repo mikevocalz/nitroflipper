@@ -1,0 +1,128 @@
+# Page-curl presentation cadence capture.
+#
+# Data sources here are only the ones this device actually registers, taken from
+# `adb shell perfetto --query` on the Surface Duo (Android 14, SDK 34):
+# gpu.renderstages and gpu.counters are NOT registered on this GPU, so GPU work
+# has to be attributed from fences and FrameTimeline rather than render stages.
+#
+# android.surfaceflinger.frametimeline cannot see SurfaceViews. It works here
+# because the canvas is non-opaque and composites into the app window; if the
+# canvas ever goes back to `opaque`, this config stops measuring the curl.
+#
+# Why this exists rather than `dumpsys SurfaceFlinger --latency`: that ring
+# holds about 127 entries and is not cleared by reading, so a run has to be
+# drained first and then kept short enough to fit. Ten button turns render ~192
+# frames, which silently keeps only the last 127 and reports statistics over the
+# tail. FrameTimeline here has no such cap.
+#
+# CHECK FOR A SECOND OUTPUT FIRST. `adb shell dumpsys display | grep VIRTUAL`
+# must come back empty. A screen-mirroring agent leaves a virtual display
+# behind that outlives whatever started it, and SurfaceFlinger then composites
+# the whole screen twice a frame. It does not show up as app work, it shows up
+# as SurfaceFlinger missing its GPU deadline, which is the thing that stuffs
+# the buffer queue. Measured on this device: mirror present 45% of app frames
+# tagged SurfaceFlinger GPU Deadline Missed, mirror killed 25%. Kill the
+# agent's process and confirm `dumpsys SurfaceFlinger --list | grep -i mirror`
+# is empty before believing any cadence number.
+#
+# CAPTURE ORDER MATTERS. Start the trace first and launch the app inside the
+# window -- `am force-stop` then `am start` after tracing begins. A process that
+# was already running when tracing started reports its own Choreographer frames
+# and nothing else: no RenderThread, no DrawFrames, no eglSwapBuffers, no
+# queueBuffer, and FrameTimeline sees two frames instead of the whole run. The
+# capture looks healthy and the data-loss gate passes, so the only way to notice
+# is to check that the app has a RenderThread before trusting anything.
+
+buffers: {
+  size_kb: 131072
+  fill_policy: DISCARD
+}
+buffers: {
+  size_kb: 8192
+  fill_policy: RING_BUFFER
+}
+
+data_sources: {
+  config {
+    name: "linux.ftrace"
+    target_buffer: 0
+    ftrace_config {
+      # Producer/consumer handoff, vsync and the HWUI frame.
+      atrace_categories: "gfx"
+      atrace_categories: "view"
+      atrace_categories: "input"
+      atrace_categories: "hal"
+      atrace_categories: "wm"
+      atrace_categories: "am"
+      atrace_categories: "dalvik"
+      atrace_categories: "binder_driver"
+      # App slices require the app to be debuggable or profileable.
+      atrace_apps: "com.example"
+      # Who was running, and who was blocked waiting for whom.
+      ftrace_events: "sched/sched_switch"
+      ftrace_events: "sched/sched_waking"
+      ftrace_events: "sched/sched_wakeup"
+      ftrace_events: "sched/sched_wakeup_new"
+      ftrace_events: "sched/sched_process_exit"
+      ftrace_events: "sched/sched_process_free"
+      ftrace_events: "task/task_newtask"
+      ftrace_events: "task/task_rename"
+      # Separates "slow because busy" from "slow because the clock was low".
+      ftrace_events: "power/cpu_frequency"
+      ftrace_events: "power/cpu_idle"
+      ftrace_events: "power/gpu_frequency"
+      ftrace_events: "power/suspend_resume"
+    }
+  }
+}
+
+# Expected vs actual present, jank classification, and the token that joins a
+# HWUI frame to what SurfaceFlinger did with it.
+data_sources: {
+  config {
+    name: "android.surfaceflinger.frametimeline"
+    target_buffer: 0
+  }
+}
+
+# RN Skia logs its swallowed updateTexImage failure here; having it inside the
+# trace puts the drain failure on the same timeline as the missing frame.
+data_sources: {
+  config {
+    name: "android.log"
+    target_buffer: 1
+    android_log_config {
+      log_ids: LID_DEFAULT
+      log_ids: LID_SYSTEM
+      log_ids: LID_CRASH
+    }
+  }
+}
+
+data_sources: {
+  config {
+    name: "linux.process_stats"
+    target_buffer: 1
+    process_stats_config {
+      scan_all_processes_on_start: true
+      proc_stats_poll_ms: 1000
+    }
+  }
+}
+
+data_sources: {
+  config {
+    name: "linux.sys_stats"
+    target_buffer: 1
+    sys_stats_config {
+      meminfo_period_ms: 1000
+      stat_period_ms: 1000
+      stat_counters: STAT_CPU_TIMES
+      stat_counters: STAT_FORK_COUNT
+    }
+  }
+}
+
+duration_ms: 30000
+flush_period_ms: 2000
+write_into_file: true

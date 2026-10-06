@@ -20,16 +20,25 @@ export interface SpreadGroup {
  *
  * `fitsTwoUp(index)` answers whether that page can share the viewport; a page
  * that cannot is a group of its own, and grouping resumes after it.
+ *
+ * `standsAlone(index)` answers whether the document says a page is a single
+ * even when it would fit. A cover is the everyday case: pair it with page one
+ * and the whole book reads a page out of step, with two leaves that belong
+ * together split across a turn. Comic archives mark those pages centre, and
+ * the pages after one resume pairing on the other parity, which the grouping
+ * below already handles because it is decided for the book at once.
  */
 export function buildSpreadGroups(
   pageCount: number,
   fitsTwoUp: (index: number) => boolean,
   allowSpread: boolean,
+  standsAlone: (index: number) => boolean = () => false,
 ): SpreadGroup[] {
   const groups: SpreadGroup[] = [];
   for (let i = 0; i < pageCount; ) {
     const paired =
-      allowSpread && fitsTwoUp(i) && i + 1 < pageCount && fitsTwoUp(i + 1);
+      allowSpread && !standsAlone(i) && fitsTwoUp(i)
+      && i + 1 < pageCount && !standsAlone(i + 1) && fitsTwoUp(i + 1);
     const size = paired ? 2 : 1;
     groups.push({ start: i, size });
     i += size;

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import argparse
 import re
+import math
+import shlex
 import statistics
 import subprocess
 import sys
@@ -22,7 +24,7 @@ import time
 VSYNC_SLACK = 1.4  # a gap longer than this many vsyncs is a dropped frame
 
 
-def window_frame(serial: str, package: str) -> tuple[int, int]:
+def window_frame(serial: str, package: str) -> tuple[int, int, int, int]:
     """
     The app window's size, not the display's.
 
@@ -37,9 +39,10 @@ def window_frame(serial: str, package: str) -> tuple[int, int]:
         if found:
             x0, y0, x1, y1 = (int(v) for v in found.groups())
             if x1 > x0 and y1 > y0:
-                return x1 - x0, y1 - y0
+                return x0, y0, x1 - x0, y1 - y0
     size = adb(serial, "shell", "wm", "size").strip().splitlines()[-1]
-    return tuple(int(v) for v in size.split(":")[-1].strip().split("x"))  # type: ignore[return-value]
+    width, height = (int(v) for v in size.split(":")[-1].strip().split("x"))
+    return 0, 0, width, height
 
 
 def adb(serial: str, *args: str) -> str:
@@ -54,18 +57,22 @@ def adb(serial: str, *args: str) -> str:
 
 def surface_layer(serial: str, package: str) -> str:
     listing = adb(serial, "shell", "dumpsys", "SurfaceFlinger", "--list")
-    for line in listing.splitlines():
-        if "BLAST" in line and package in line:
-            return line.strip()
-    raise SystemExit(f"no BLAST layer for {package}; is the canvas opaque?")
+    candidates = [line.strip() for line in listing.splitlines()
+                  if "BLAST" in line and "SurfaceView" in line and package in line]
+    if len(candidates) == 1:
+        return candidates[0]
+    raise SystemExit(f"expected one canvas SurfaceView, found {len(candidates)}; "
+                     "choose its exact SurfaceFlinger name with --layer")
 
 
 def present_times(serial: str, layer: str) -> tuple[float, list[int]]:
-    out = adb(serial, "shell", f"dumpsys SurfaceFlinger --latency '{layer}'")
+    out = adb(serial, "shell", f"dumpsys SurfaceFlinger --latency {shlex.quote(layer)}")
     rows = [r.split() for r in out.splitlines() if r.strip()]
     if not rows:
         raise SystemExit("no latency data; the layer name may have changed")
     vsync_ms = int(rows[0][0]) / 1e6
+    if vsync_ms <= 0:
+        raise SystemExit("no refresh interval; is the display active?")
     frames = []
     for row in rows[1:]:
         if len(row) != 3:
@@ -78,52 +85,78 @@ def present_times(serial: str, layer: str) -> tuple[float, list[int]]:
         if present in (0, 9223372036854775807):
             continue
         frames.append(present)
-    return vsync_ms, sorted(frames)
+    return vsync_ms, sorted(set(frames))
+
+
+def frame_gaps(frames: list[int]) -> list[float]:
+    """Keep every gap inside a turn, including stalls longer than 400 ms."""
+    ordered = sorted(set(frames))
+    return [(b - a) / 1e6 for a, b in zip(ordered, ordered[1:])]
+
+
+def percentile(values: list[float], fraction: float) -> float:
+    return sorted(values)[max(0, math.ceil(len(values) * fraction) - 1)]
+
+
+def pacing_passes(gaps: list[float], vsync_ms: float,
+                  max_missed_pct: float, max_gap_ms: float) -> bool:
+    if not gaps or vsync_ms <= 0:
+        return False
+    missed = sum(g > vsync_ms * VSYNC_SLACK for g in gaps)
+    return (percentile(gaps, 0.95) <= vsync_ms * VSYNC_SLACK
+            and 100 * missed / len(gaps) <= max_missed_pct
+            and max(gaps) <= max_gap_ms)
 
 
 def run(args) -> int:
-    layer = surface_layer(args.serial, args.package)
-    width, height = window_frame(args.serial, args.package)
-    present_times(args.serial, layer)  # drain whatever came before
-
-    for _ in range(args.turns):
+    layer = args.layer or surface_layer(args.serial, args.package)
+    x0, y0, width, height = window_frame(args.serial, args.package)
+    all_gaps: list[float] = []
+    total_frames = 0
+    passed = True
+    print(f"layer      {layer}")
+    for turn in range(args.turns):
+        # A read does not drain SurfaceFlinger. Explicitly exclude its history,
+        # and sample each turn before the rolling buffer loses earlier turns.
+        vsync_ms, before = present_times(args.serial, layer)
+        baseline = max(before, default=0)
         if args.tap:
-            # A tap on the page control runs the same curl with no touch
-            # stream behind it, which is the only way to see the animation's
-            # own cadence: `input swipe` emits a handful of move events, so a
-            # drag measured this way is really measuring the input generator.
             x, y = (float(v) for v in args.tap.split(","))
             adb(args.serial, "shell", "input", "tap",
-                str(int(width * x)), str(int(height * y)))
+                str(x0 + int(width * x)), str(y0 + int(height * y)))
         else:
-            adb(
-                args.serial, "shell", "input", "swipe",
-                str(int(width * 0.92)), str(height // 2),
-                str(int(width * 0.08)), str(height // 2), str(args.swipe_ms),
-            )
+            adb(args.serial, "shell", "input", "swipe",
+                str(x0 + int(width * 0.92)), str(y0 + height // 2),
+                str(x0 + int(width * 0.08)), str(y0 + height // 2), str(args.swipe_ms))
         time.sleep(args.settle)
-
-    vsync_ms, frames = present_times(args.serial, layer)
-    gaps = [
-        (b - a) / 1e6
-        for a, b in zip(frames, frames[1:])
-        if 0 < (b - a) / 1e6 < args.idle_ms
-    ]
-    if not gaps:
-        print("no frames presented -- did the swipe land on the reader?")
+        vsync_ms, after = present_times(args.serial, layer)
+        frames = [timestamp for timestamp in after if timestamp > baseline]
+        gaps = frame_gaps(frames)
+        all_gaps.extend(gaps)
+        total_frames += len(frames)
+        # No inter-turn gap enters this sample. No within-turn gap is removed.
+        # A snap or an ignored gesture must not pass on one attractive median.
+        complete = args.min_frames <= len(frames) < 127
+        good = complete and pacing_passes(gaps, vsync_ms,
+                                         args.max_missed_pct, args.max_gap_ms)
+        passed = passed and good
+        peak = max(gaps, default=0)
+        print(f"turn {turn + 1:>3}   {len(frames)} frames, max {peak:.1f}ms: "
+              f"{'PASS' if good else 'FAIL'}")
+        if len(frames) >= 127:
+            print("           latency buffer may have wrapped; sample is incomplete")
+    if not all_gaps:
+        print("no frame intervals -- did the input reach a ready page turn?")
         return 1
-
-    dropped = sum(1 for g in gaps if g > vsync_ms * VSYNC_SLACK)
-    median = statistics.median(gaps)
-    print(f"layer      {layer}")
+    missed = sum(g > vsync_ms * VSYNC_SLACK for g in all_gaps)
+    median = statistics.median(all_gaps)
     print(f"vsync      {vsync_ms:.1f}ms ({1000 / vsync_ms:.0f}Hz panel)")
-    print(f"frames     {len(frames)} presented over {args.turns} turns")
+    print(f"frames     {total_frames} presented over {args.turns} turns")
     print(f"gap p50    {median:.1f}ms -> {1000 / median:.0f}fps")
-    print(f"gap p90    {statistics.quantiles(gaps, n=10)[8]:.1f}ms")
-    print(f"gap max    {max(gaps):.1f}ms")
-    print(f"dropped    {dropped}/{len(gaps)} ({100 * dropped / len(gaps):.0f}%)")
-    # A turn that holds the panel's rate is the bar; anything else is visible.
-    return 0 if median <= vsync_ms * VSYNC_SLACK else 1
+    print(f"gap p95    {percentile(all_gaps, 0.95):.1f}ms")
+    print(f"gap max    {max(all_gaps):.1f}ms")
+    print(f"late gaps  {missed}/{len(all_gaps)} ({100 * missed / len(all_gaps):.1f}%)")
+    return 0 if passed else 1
 
 
 def main() -> int:
@@ -134,8 +167,14 @@ def main() -> int:
     p.add_argument("--swipe-ms", type=int, default=220)
     p.add_argument("--tap", help="turn via a tap at normalized 'x,y' instead")
     p.add_argument("--settle", type=float, default=1.2)
-    p.add_argument("--idle-ms", type=float, default=400, help="gap that means idle")
-    return run(p.parse_args())
+    p.add_argument("--layer", help="exact canvas SurfaceView name from SurfaceFlinger --list")
+    p.add_argument("--min-frames", type=int, default=8)
+    p.add_argument("--max-missed-pct", type=float, default=5)
+    p.add_argument("--max-gap-ms", type=float, default=50)
+    args = p.parse_args()
+    if args.turns < 1 or args.min_frames < 2 or args.settle <= 0:
+        p.error("turns must be positive, min-frames >= 2, and settle > 0")
+    return run(args)
 
 
 if __name__ == "__main__":

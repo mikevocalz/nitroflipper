@@ -73,6 +73,22 @@ def enableProguardInReleaseBuilds = false
 def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
 
 android {
+    sourceSets {
+        main {
+            // Package the fixtures as real APK assets, referenced where they
+            // already live rather than copied in: MMPR1.cbz alone is 53MB and a
+            // second copy in the repo is 53MB nobody needs.
+            //
+            // Assets, not JS-imported resources, because the reader hands the
+            // document engine a file path. `Image.resolveAssetSource` gives a
+            // Metro http URL in dev and a bare resource name in release, and
+            // ReactNativeBlobUtil cannot fetch an `android.resource://` URI at
+            // all -- its native side reports `url == null` and the release app
+            // opens to a red string and no book. `bundle-assets://` works in
+            // both builds.
+            assets.srcDirs += ['../../src/assets']
+        }
+    }
     ndkVersion rootProject.ext.ndkVersion
     buildToolsVersion rootProject.ext.buildToolsVersion
     compileSdk rootProject.ext.compileSdkVersion

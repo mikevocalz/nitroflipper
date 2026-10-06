@@ -157,6 +157,29 @@ if [ -f "$PKG/NitroFlipper.podspec" ] && command -v ruby >/dev/null 2>&1; then
   (cd "$PKG" && ruby -c NitroFlipper.podspec >/dev/null) || fail "NitroFlipper.podspec is not valid ruby"
 fi
 
+# --- 4. entry points ---------------------------------------------------------
+
+# The fields a consumer's resolver actually reads. `main` pointed at
+# `lib/index` for a while when tsc was emitting `lib/src/index.js` -- Metro
+# never noticed, because it takes `react-native` first, so the package looked
+# fine from the example app and broke for everyone else.
+echo "==> package.json entry points resolve"
+while read -r field value; do
+  [ -n "$value" ] && [ "$value" != "null" ] || continue
+  resolved=""
+  for candidate in "$value" "$value.js" "$value.ts" "$value/index.js" "$value/index.ts"; do
+    if [ -f "$PKG/$candidate" ]; then resolved="$candidate"; break; fi
+  done
+  if [ -z "$resolved" ]; then
+    fail "package.json \"$field\": \"$value\" does not resolve in the tarball"
+  fi
+done < <(node -e '
+  const p = require("'"$PKG"'/package.json");
+  for (const f of ["main", "module", "types", "react-native", "source"]) {
+    if (p[f]) console.log(f, p[f]);
+  }
+')
+
 # --- report ------------------------------------------------------------------
 
 BYTES=$(wc -c < "$TARBALL" | tr -d ' ')
